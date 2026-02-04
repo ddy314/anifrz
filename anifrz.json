@@ -1,0 +1,18 @@
+{
+  "db_path": "./anifrz.db",
+  "llm": {
+    "base_url": "http://127.0.0.1:11434",
+    "model": "qwen3:4b",
+    "mode": "ollama"
+  },
+  "bgm": {
+    "base_url": "https://api.bgm.tv",
+    "token": "RGdAfHYg0ESnBDqeMBVoykTUAK23ulHjXdqeR9Ai"
+  },
+  "scan": {
+    "min_size_mb": 100,
+    "extensions": ["mp4", "mkv", "avi"],
+    "enable_hash": true,
+    "max_concurrency": 6
+  }
+}
