@@ -3,7 +3,8 @@
 ## 功能
 - 扫描本地番剧文件夹，自动识别番剧信息
 - 支持多种视频格式
-- 提供界面进行观看和管理
+- 后端以 JSON 形式按作品持久化存储
+- 父目录名为 `sp`/`sps`/`special`/`cd` 时会直接跳过，不进入 LLM
 
 ## 技术
 - 采用LLM做文件名解析（支持批处理大量文件）
@@ -13,7 +14,8 @@
 
 ### 配置
 
-支持两种配置方式，优先级为：**环境变量 > config.toml > 默认值**
+支持两种配置方式，优先级为：**环境变量 > config.toml > 默认值**  
+LLM 相关配置仅读取 `config.toml`（不再从环境变量读取）。
 
 #### 方式 1: 使用配置文件（推荐）
 
@@ -31,8 +33,19 @@ limit = 20
 
 [llm]
 url = "http://127.0.0.1:11434"
+provider = "ollama" # ollama / openai
+remote_url = "" # OpenAI 兼容地址
+remote_token = "" # OpenAI 兼容 Token
 model = "qwen3:4b"
 batch_size = 15  # 每批处理的文件名数量
+match_concurrency = 4 # 匹配阶段并发数
+
+[library]
+dir = "library"  # 持久化目录
+refresh_days = 7 # 评分与集信息刷新周期
+
+[media]
+min_media_size_mb = 30 # 小于该阈值的文件默认不参与匹配
 ```
 
 #### 方式 2: 使用环境变量
@@ -41,17 +54,31 @@ batch_size = 15  # 每批处理的文件名数量
 export BGM_BASE_URL=https://api.bgm.tv
 export BGM_TOKEN=your_token_here
 export BGM_LIMIT=20
-export OLLAMA_URL=http://127.0.0.1:11434
-export OLLAMA_MODEL=qwen3:4b
-export LLM_BATCH_SIZE=15
+export BGM_TIMEOUT_SECS=20
+export BGM_RETRY=0
+export BGM_RETRY_DELAY_MS=500
+export BGM_DEBUG=0
+export BGM_TOLERATE_ERRORS=0
+export LIBRARY_DIR=library
+export REFRESH_DAYS=7
+export MIN_MEDIA_SIZE_MB=30
 ```
+
+说明：
+- `BGM_DEBUG=1` 会输出每个请求的日志（便于定位网络或接口错误）
+- `BGM_TOLERATE_ERRORS=1` 会在 BGM 请求失败时继续匹配其它条目
+- `BGM_RETRY` / `BGM_RETRY_DELAY_MS` 控制重试次数与间隔（毫秒）
+- `BGM_TIMEOUT_SECS` 控制 BGM 请求超时时间
 
 ### 运行
 ```bash
 # 启动 Ollama 服务
 ollama serve
 
-# 生成报告
+# 一键刮削（目录内媒体将自动匹配并写入 library/）
+cargo run -- scrape /path/to/media
+
+# 生成报告（仍保留原有命令）
 cargo run -- report [input.txt] [output.json]
 ```
 
@@ -59,7 +86,7 @@ cargo run -- report [input.txt] [output.json]
 
 当处理大量文件名时（超过 15 个），程序会自动将它们分批发送给 LLM 处理，以提高准确性：
 - 默认每批处理 15 个文件名
-- 可通过 `LLM_BATCH_SIZE` 环境变量调整批次大小
+- 可通过 `config.toml` 的 `llm.batch_size` 调整批次大小
 - 对于小模型（如 qwen3:4b），建议使用较小的批次（10-15）
 - 对于大模型（如 qwen2.5:32b），可以增加到 30-50
 
