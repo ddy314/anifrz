@@ -18,6 +18,36 @@ function isMovieLike(item: SeriesWallItem) {
   return item.total_episode_count <= 1 || /剧场版|movie|映画|ova|oad/.test(text);
 }
 
+function FpsOverlay() {
+  const [fps, setFps] = useState(0);
+
+  useEffect(() => {
+    let frameCount = 0;
+    let lastTime = performance.now();
+    let rafId = 0;
+
+    const tick = (now: number) => {
+      frameCount += 1;
+      const delta = now - lastTime;
+      if (delta >= 1000) {
+        setFps(Math.round((frameCount * 1000) / delta));
+        frameCount = 0;
+        lastTime = now;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
+
+  return (
+    <div className="pointer-events-none fixed right-4 top-4 z-50 rounded-md border border-white/10 bg-black/70 px-2 py-1 text-xs text-white/80 backdrop-blur">
+      FPS {fps}
+    </div>
+  );
+}
+
 function App() {
   const initialize = useStore((state) => state.initialize);
   const library = useStore((state) => state.library);
@@ -52,6 +82,7 @@ function App() {
   return (
     <div className="min-h-screen bg-[#141414] text-white selection:bg-netflix-red selection:text-white">
       <Navbar activeTab={activeTab} onTabChange={setActiveTab} />
+      <FpsOverlay />
 
       <main className="pb-20">
         {isLoading ? (
