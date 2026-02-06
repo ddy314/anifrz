@@ -1,0 +1,149 @@
+:root {
+  --bg-a: #f3ead7;
+  --bg-b: #d9efe2;
+  --ink: #152b2a;
+  --muted: #3b5a59;
+  --panel: rgba(255, 255, 255, 0.76);
+  --accent: #b54837;
+  --accent-2: #1f6f64;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  font-family: "Space Grotesk", "Noto Sans SC", "PingFang SC", sans-serif;
+  background:
+    radial-gradient(circle at 8% 5%, #fff2cc 0, transparent 38%),
+    radial-gradient(circle at 92% 90%, #d7f6ff 0, transparent 40%),
+    linear-gradient(130deg, var(--bg-a), var(--bg-b));
+}
+
+.page {
+  width: min(1100px, 94vw);
+  margin: 28px auto 40px;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid rgba(21, 43, 42, 0.12);
+  border-radius: 16px;
+  padding: 16px 18px;
+  backdrop-filter: blur(3px);
+}
+
+.control {
+  grid-column: 1 / -1;
+}
+
+h1,
+h2 {
+  margin: 0 0 8px;
+  letter-spacing: 0.01em;
+}
+
+h1 {
+  font-size: 30px;
+}
+
+h2 {
+  font-size: 18px;
+}
+
+p {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+input {
+  flex: 1;
+  min-width: 280px;
+  border-radius: 10px;
+  border: 1px solid rgba(21, 43, 42, 0.2);
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: #fff;
+  background: linear-gradient(120deg, var(--accent), #db6f43);
+  cursor: pointer;
+  transition: transform 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+button#reloadBtn {
+  background: linear-gradient(120deg, var(--accent-2), #37a896);
+}
+
+.status-text {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.metrics {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.logs pre {
+  margin: 0;
+  height: 200px;
+  overflow: auto;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #c8f9e8;
+  padding: 10px;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 12px;
+}
+
+.series-list {
+  display: grid;
+  gap: 10px;
+}
+
+.series-card {
+  border-radius: 12px;
+  border: 1px solid rgba(21, 43, 42, 0.14);
+  background: rgba(255, 255, 255, 0.88);
+  padding: 10px 12px;
+}
+
+.series-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.series-meta {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+@media (max-width: 860px) {
+  .page {
+    grid-template-columns: 1fr;
+  }
+}

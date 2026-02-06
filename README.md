@@ -3,8 +3,9 @@
 ## 功能
 - 扫描本地番剧文件夹，自动识别番剧信息
 - 支持多种视频格式
-- 后端以 JSON 形式按作品持久化存储
+- 后端使用 SQLite 本地数据库持久化存储
 - 父目录名为 `sp`/`sps`/`special`/`cd` 时会直接跳过，不进入 LLM
+- 匹配阶段实时入库（匹配到确定结果即写入 `file_matches`），便于前端感知进度
 
 ## 技术
 - 采用LLM做文件名解析（支持批处理大量文件）
@@ -41,7 +42,7 @@ batch_size = 15  # 每批处理的文件名数量
 match_concurrency = 4 # 匹配阶段并发数
 
 [library]
-dir = "library"  # 持久化目录
+dir = "library"  # 持久化目录（数据库路径默认: library/anifrz.db；也可直接填 *.db 文件）
 refresh_days = 7 # 评分与集信息刷新周期
 
 [media]
@@ -80,6 +81,9 @@ cargo run -- scrape /path/to/media
 
 # 生成报告（仍保留原有命令）
 cargo run -- report [input.txt] [output.json]
+
+# 启动最小 Tauri 前端（需要启用 tauri-ui feature）
+cargo run --features tauri-ui -- gui
 ```
 
 ## 批处理说明

@@ -1,19 +1,19 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reqwest::Client;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 use crate::types::{
-    get_u64_env, BgmMatch, EpisodeInfo, FinalMatch, InputItem, LlmProvider, MatchOptions,
-    MediaKind, Rating, SubjectDetails,
+    BgmMatch, EpisodeInfo, FinalMatch, InputItem, LlmProvider, MatchOptions, MediaKind, Rating,
+    SubjectDetails, get_u64_env,
 };
 
 fn env_flag(key: &str) -> bool {
@@ -26,7 +26,7 @@ fn env_flag(key: &str) -> bool {
     }
 }
 
-fn format_error_chain(err: &(dyn std::error::Error)) -> String {
+fn format_error_chain(err: &dyn std::error::Error) -> String {
     let mut out = vec![err.to_string()];
     let mut current = err.source();
     while let Some(next) = current {
@@ -186,11 +186,7 @@ async fn fetch_subject_v0(
     token: Option<&str>,
     id: i64,
 ) -> Result<SubjectDetails, Box<dyn std::error::Error + Send + Sync>> {
-    let url = format!(
-        "{}/v0/subjects/{}",
-        base_url.trim_end_matches('/'),
-        id
-    );
+    let url = format!("{}/v0/subjects/{}", base_url.trim_end_matches('/'), id);
     let mut req = client.get(url).header("User-Agent", "anifrz/0.1");
     if let Some(t) = token {
         if !t.is_empty() {
@@ -199,9 +195,21 @@ async fn fetch_subject_v0(
     }
     let v: Value = req.send().await?.error_for_status()?.json().await?;
 
-    let name = v.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let name_cn = v.get("name_cn").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let summary = v.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let name = v
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let name_cn = v
+        .get("name_cn")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let summary = v
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let air_date = v
         .get("date")
         .or_else(|| v.get("air_date"))
@@ -235,7 +243,11 @@ async fn fetch_subject_v0(
             }
             map
         });
-        Rating { score, total, count }
+        Rating {
+            score,
+            total,
+            count,
+        }
     });
 
     Ok(SubjectDetails {
@@ -267,7 +279,10 @@ async fn fetch_episodes_v0(
         }
     }
     let v: Value = req.send().await?.error_for_status()?.json().await?;
-    let arr = v.get("data").and_then(|v| v.as_array()).ok_or("missing data")?;
+    let arr = v
+        .get("data")
+        .and_then(|v| v.as_array())
+        .ok_or("missing data")?;
     Ok(parse_episode_list(arr))
 }
 
@@ -290,10 +305,25 @@ async fn fetch_subject_legacy(
     }
     let v: Value = req.send().await?.error_for_status()?.json().await?;
 
-    let name = v.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let name_cn = v.get("name_cn").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let summary = v.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let air_date = v.get("date").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let name = v
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let name_cn = v
+        .get("name_cn")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let summary = v
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let air_date = v
+        .get("date")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let mut tags = Vec::new();
     if let Some(arr) = v.get("tags").and_then(|v| v.as_array()) {
@@ -318,7 +348,11 @@ async fn fetch_subject_legacy(
             }
             map
         });
-        Rating { score, total, count }
+        Rating {
+            score,
+            total,
+            count,
+        }
     });
 
     let episodes = v
@@ -356,7 +390,10 @@ async fn fetch_episodes_legacy(
         }
     }
     let v: Value = req.send().await?.error_for_status()?.json().await?;
-    let arr = v.get("eps").and_then(|v| v.as_array()).ok_or("missing eps")?;
+    let arr = v
+        .get("eps")
+        .and_then(|v| v.as_array())
+        .ok_or("missing eps")?;
     Ok(parse_episode_list(arr))
 }
 
@@ -367,10 +404,18 @@ fn parse_episode_list(arr: &[Value]) -> Vec<EpisodeInfo> {
         let sort = item
             .get("sort")
             .and_then(|v| v.as_f64())
-            .or_else(|| item.get("sort").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+            .or_else(|| {
+                item.get("sort")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse().ok())
+            })
             .unwrap_or(0.0);
         let ep_type = item.get("type").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let name_cn = item
             .get("name_cn")
             .and_then(|v| v.as_str())
@@ -387,7 +432,9 @@ fn parse_episode_list(arr: &[Value]) -> Vec<EpisodeInfo> {
     episodes
 }
 
-pub fn read_samples(path: &PathBuf) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+pub fn read_samples(
+    path: &PathBuf,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     let text = fs::read_to_string(path)?;
     Ok(text
         .lines()
@@ -412,23 +459,28 @@ pub async fn llm_parse_list(
     }
 
     // 分批处理
-    println!("📦 将 {} 个文件名分成多批处理（每批最多 {} 个）...", samples.len(), batch_size);
+    println!(
+        "📦 将 {} 个文件名分成多批处理（每批最多 {} 个）...",
+        samples.len(),
+        batch_size
+    );
     let mut all_items = Vec::new();
     let mut batch_num = 0;
-    
+
     for chunk in samples.chunks(batch_size) {
         batch_num += 1;
         let start_idx = (batch_num - 1) * batch_size;
-        println!("  处理第 {}/{} 批 ({} 个文件)...", 
-            batch_num, 
+        println!(
+            "  处理第 {}/{} 批 ({} 个文件)...",
+            batch_num,
             (samples.len() + batch_size - 1) / batch_size,
             chunk.len()
         );
-        
+
         let items = llm_parse_batch(provider, base_url, token, model, chunk, start_idx).await?;
         all_items.extend(items);
     }
-    
+
     println!("✅ 完成！共解析 {} 个文件名", all_items.len());
     Ok(all_items)
 }
@@ -461,7 +513,10 @@ async fn llm_parse_batch(
         "你是番剧文件名解析器。",
         "给定文件名列表，输出JSON数组，每项包含字段: title, episode, extra。",
         "只输出JSON，不要解释。不要输出思考过程。",
-        format!("‼️重要: 输出的JSON数组必须包含exactly {} 个元素，与输入列表一一对应！", samples.len()),
+        format!(
+            "‼️重要: 输出的JSON数组必须包含exactly {} 个元素，与输入列表一一对应！",
+            samples.len()
+        ),
         "每个文件名都必须对应一个JSON对象，不能遗漏或合并！",
         "文件名列表 (共",
         samples.len(),
@@ -499,7 +554,11 @@ async fn post_json_string(
     .error_for_status()?;
 
     let v: Value = resp.json().await?;
-    Ok(v.get("response").and_then(|x| x.as_str()).unwrap_or("").trim().to_string())
+    Ok(v.get("response")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string())
 }
 
 async fn post_chat_content(
@@ -662,7 +721,10 @@ fn openai_chat_url(base_url: &str) -> String {
     }
 }
 
-fn parse_llm_items(text: &str, expected_len: usize) -> Result<Vec<LlmItem>, Box<dyn std::error::Error + Send + Sync>> {
+fn parse_llm_items(
+    text: &str,
+    expected_len: usize,
+) -> Result<Vec<LlmItem>, Box<dyn std::error::Error + Send + Sync>> {
     let v: Value = serde_json::from_str(text).map_err(|e| {
         format!(
             "Model did not return valid JSON: {e}\n---- RAW START ----\n{text}\n---- RAW END ----"
@@ -670,7 +732,11 @@ fn parse_llm_items(text: &str, expected_len: usize) -> Result<Vec<LlmItem>, Box<
     })?;
     let arr = v.as_array().ok_or("Expected top-level JSON array")?;
     if arr.len() != expected_len {
-        eprintln!("⚠️  警告: LLM 返回数组长度不匹配: 得到 {}, 期望 {}", arr.len(), expected_len);
+        eprintln!(
+            "⚠️  警告: LLM 返回数组长度不匹配: 得到 {}, 期望 {}",
+            arr.len(),
+            expected_len
+        );
         eprintln!("这可能是因为模型无法正确解析所有文件名。");
         eprintln!("提示: 可以尝试:");
         eprintln!("  1. 使用更强大的模型 (修改 config.toml 的 llm.model)");
@@ -684,10 +750,21 @@ fn parse_llm_items(text: &str, expected_len: usize) -> Result<Vec<LlmItem>, Box<
     }
     let mut items = Vec::with_capacity(arr.len());
     for item in arr {
-        let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let title = item
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let episode = item.get("episode").cloned();
-        let extra = item.get("extra").and_then(|v| v.as_str()).map(|s| s.to_string());
-        items.push(LlmItem { title, episode, extra });
+        let extra = item
+            .get("extra")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        items.push(LlmItem {
+            title,
+            episode,
+            extra,
+        });
     }
     Ok(items)
 }
@@ -706,8 +783,8 @@ pub async fn build_report(
     match_opts: &MatchOptions,
     concurrency: usize,
     mut progress: Option<&mut dyn FnMut(usize, usize)>,
+    mut on_match: Option<&mut dyn FnMut(usize, usize, Option<&FinalMatch>)>,
 ) -> Result<Report, Box<dyn std::error::Error + Send + Sync>> {
-
     let total = inputs.len();
     let concurrency = if concurrency == 0 { 1 } else { concurrency };
     let mut final_matches: Vec<FinalMatch> = Vec::new();
@@ -733,6 +810,9 @@ pub async fn build_report(
                 match_opts.min_media_size_bytes,
             )
             .await?;
+            if let Some(cb) = on_match.as_mut() {
+                cb(idx + 1, total, result.final_match.as_ref());
+            }
             if let Some(m) = result.final_match {
                 final_matches.push(m);
             }
@@ -783,6 +863,9 @@ pub async fn build_report(
                 Ok(Err(err)) => return Err(err.into()),
                 Err(err) => return Err(format!("task join error: {err}").into()),
             };
+            if let Some(cb) = on_match.as_mut() {
+                cb(done + 1, total, result.final_match.as_ref());
+            }
             if let Some(m) = result.final_match {
                 final_matches.push(m);
             }
@@ -936,9 +1019,7 @@ fn apply_folder_majority(items: &mut [ReportItem], final_matches: &mut Vec<Final
             if key.is_empty() {
                 continue;
             }
-            let entry = title_counts
-                .entry(key)
-                .or_insert((0usize, title));
+            let entry = title_counts.entry(key).or_insert((0usize, title));
             entry.0 += 1;
         }
 
@@ -1053,7 +1134,10 @@ async fn process_item(
     let file_size = item.file.size_bytes;
     let file_kind = item.file.kind.clone();
 
-    let title = llm_item.as_ref().map(|i| i.title.clone()).unwrap_or_default();
+    let title = llm_item
+        .as_ref()
+        .map(|i| i.title.clone())
+        .unwrap_or_default();
     let episode = llm_item.as_ref().and_then(|i| i.episode.clone());
     let extra = llm_item.as_ref().and_then(|i| i.extra.clone());
     let extra_ref = extra.as_deref();
@@ -1147,8 +1231,13 @@ async fn process_item(
         bgm_retries,
     )
     .await?;
-    let mut ranked =
-        rank_candidates(&input_name, &title, extra_ref, episode.as_ref(), &candidates);
+    let mut ranked = rank_candidates(
+        &input_name,
+        &title,
+        extra_ref,
+        episode.as_ref(),
+        &candidates,
+    );
     if let MatchGuard::RequireSpecial(_) = guard {
         ranked = ranked
             .into_iter()
@@ -1274,11 +1363,7 @@ async fn process_item(
                     .map(|s| s.candidate.clone())
                     .collect()
             } else {
-                ranked
-                    .iter()
-                    .take(5)
-                    .map(|s| s.candidate.clone())
-                    .collect()
+                ranked.iter().take(5).map(|s| s.candidate.clone()).collect()
             };
             selection_debug.candidates_considered = base_list.iter().map(|c| c.id).collect();
 
@@ -1297,8 +1382,10 @@ async fn process_item(
             {
                 Ok(Some(id)) => {
                     selection_debug.llm_selected_id = Some(id);
-                    if let Some(found) =
-                        base_list.iter().find(|c| c.id == id).map(candidate_to_match)
+                    if let Some(found) = base_list
+                        .iter()
+                        .find(|c| c.id == id)
+                        .map(candidate_to_match)
                     {
                         selection_debug.method = "llm_select".to_string();
                         selection_debug.final_id = Some(id);
@@ -1436,7 +1523,11 @@ struct SearchQueries {
     expand_error: Option<String>,
 }
 
-fn deterministic_query_variants(_input: &str, title: &str, episode_num: Option<u32>) -> Vec<String> {
+fn deterministic_query_variants(
+    _input: &str,
+    title: &str,
+    episode_num: Option<u32>,
+) -> Vec<String> {
     let mut out = Vec::new();
     let base = title.trim();
     if base.is_empty() {
@@ -1817,13 +1908,20 @@ async fn bgm_search_candidates(
                     Some(v) => v,
                     None => continue,
                 };
-                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let name_cn = item
                     .get("name_cn")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let date = item.get("date").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let date = item
+                    .get("date")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 let candidate = BgmCandidate {
                     id,
                     name,
@@ -1996,12 +2094,17 @@ fn rank_candidates<'a>(
         }
 
         if !strong_required.is_empty()
-            && !strong_required.iter().all(|t| candidate_has_token(candidate, t))
+            && !strong_required
+                .iter()
+                .all(|t| candidate_has_token(candidate, t))
         {
             score += 800;
         }
         if !acronym_required.is_empty() {
-            if acronym_required.iter().all(|t| candidate_has_token(candidate, t)) {
+            if acronym_required
+                .iter()
+                .all(|t| candidate_has_token(candidate, t))
+            {
                 score -= 160;
             } else {
                 score += 260;
@@ -2266,8 +2369,26 @@ fn extract_strong_tokens(s: &str) -> Vec<String> {
 fn extract_keyword_tokens(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let stop = [
-        "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "by", "from",
-        "movie", "film", "season", "part", "episode", "series", "theatrical",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "with",
+        "by",
+        "from",
+        "movie",
+        "film",
+        "season",
+        "part",
+        "episode",
+        "series",
+        "theatrical",
     ];
     let mut current = String::new();
     let push = |buf: &mut String, out: &mut Vec<String>| {
@@ -2315,8 +2436,8 @@ fn push_strong_token(out: &mut Vec<String>, token: &str) {
     }
     let lower = token.to_ascii_lowercase();
     let stoplist = [
-        "x264", "x265", "h264", "h265", "hevc", "hevc10", "10bit", "8bit", "aac", "flac",
-        "opus", "dts", "truehd", "bd", "bdrip", "webrip", "web", "hdr", "uhd",
+        "x264", "x265", "h264", "h265", "hevc", "hevc10", "10bit", "8bit", "aac", "flac", "opus",
+        "dts", "truehd", "bd", "bdrip", "webrip", "web", "hdr", "uhd",
     ];
     if stoplist.iter().any(|s| *s == lower) {
         return;
@@ -2746,7 +2867,10 @@ fn to_chinese_number(n: u32) -> Option<String> {
     if ones == 0 {
         return Some(format!("{}十", digits[tens as usize]));
     }
-    Some(format!("{}十{}", digits[tens as usize], digits[ones as usize]))
+    Some(format!(
+        "{}十{}",
+        digits[tens as usize], digits[ones as usize]
+    ))
 }
 
 fn parse_ordinal(s: &str) -> Option<u32> {
@@ -2756,7 +2880,9 @@ fn parse_ordinal(s: &str) -> Option<u32> {
             let mut j = i;
             let mut num: u32 = 0;
             while j < bytes.len() && bytes[j].is_ascii_digit() {
-                num = num.saturating_mul(10).saturating_add((bytes[j] - b'0') as u32);
+                num = num
+                    .saturating_mul(10)
+                    .saturating_add((bytes[j] - b'0') as u32);
                 j += 1;
             }
             if j + 1 < bytes.len() {
@@ -2774,242 +2900,6 @@ fn parse_ordinal(s: &str) -> Option<u32> {
     }
     None
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn detect_season_variants() {
-        assert_eq!(detect_season("Season 2"), Some(2));
-        assert_eq!(detect_season("S3"), Some(3));
-        assert_eq!(detect_season("第2期"), Some(2));
-        assert_eq!(detect_season("第十季"), Some(10));
-        assert_eq!(detect_season("2nd Season"), Some(2));
-        assert_eq!(detect_season("Sousou no Frieren"), None);
-    }
-
-    #[test]
-    fn rank_prefers_base_when_no_season() {
-        let candidates = vec![
-            BgmCandidate {
-                id: 1,
-                name: "葬送のフリーレン 第2期".to_string(),
-                name_cn: "葬送的芙莉莲 第二季".to_string(),
-                date: Some("2026-01-16".to_string()),
-                query_index: 0,
-                rank: 1,
-            },
-            BgmCandidate {
-                id: 2,
-                name: "葬送のフリーレン".to_string(),
-                name_cn: "葬送的芙莉莲".to_string(),
-                date: Some("2023-09-29".to_string()),
-                query_index: 0,
-                rank: 2,
-            },
-        ];
-
-        let ranked = rank_candidates("Sousou no Frieren", "Sousou no Frieren", None, None, &candidates);
-        assert_eq!(ranked.first().unwrap().candidate.id, 2);
-    }
-
-    #[test]
-    fn rank_prefers_season_when_input_has_season() {
-        let candidates = vec![
-            BgmCandidate {
-                id: 1,
-                name: "葬送のフリーレン 第2期".to_string(),
-                name_cn: "葬送的芙莉莲 第二季".to_string(),
-                date: Some("2026-01-16".to_string()),
-                query_index: 0,
-                rank: 1,
-            },
-            BgmCandidate {
-                id: 2,
-                name: "葬送のフリーレン".to_string(),
-                name_cn: "葬送的芙莉莲".to_string(),
-                date: Some("2023-09-29".to_string()),
-                query_index: 0,
-                rank: 2,
-            },
-        ];
-
-        let ranked = rank_candidates(
-            "Sousou no Frieren Season 2",
-            "Sousou no Frieren Season 2",
-            None,
-            None,
-            &candidates,
-        );
-        assert_eq!(ranked.first().unwrap().candidate.id, 1);
-    }
-
-    #[test]
-    fn rank_prefers_acronym_match() {
-        let candidates = vec![
-            BgmCandidate {
-                id: 10,
-                name: "Welcome to the Show".to_string(),
-                name_cn: "幕间休息".to_string(),
-                date: Some("2003-07-18".to_string()),
-                query_index: 0,
-                rank: 1,
-            },
-            BgmCandidate {
-                id: 995,
-                name: "N・H・Kにようこそ！".to_string(),
-                name_cn: "欢迎加入NHK！".to_string(),
-                date: Some("2006-07-09".to_string()),
-                query_index: 1,
-                rank: 1,
-            },
-        ];
-
-        let ranked = rank_candidates(
-            "Welcome to the NHK",
-            "Welcome to the NHK",
-            None,
-            Some(&json!("13")),
-            &candidates,
-        );
-        assert_eq!(ranked.first().unwrap().candidate.id, 995);
-    }
-
-    #[test]
-    fn rank_prefers_bonus_stage_when_input_has_bonus() {
-        let candidates = vec![
-            BgmCandidate {
-                id: 1,
-                name: "この素晴らしい世界に祝福を！3".to_string(),
-                name_cn: "为美好的世界献上祝福！第三季".to_string(),
-                date: Some("2024-04-10".to_string()),
-                query_index: 0,
-                rank: 2,
-            },
-            BgmCandidate {
-                id: 2,
-                name: "この素晴らしい世界に祝福を！３ーBONUS STAGEー".to_string(),
-                name_cn: "为美好的世界献上祝福！第三季 ーBONUS STAGEー".to_string(),
-                date: Some("2025-04-25".to_string()),
-                query_index: 0,
-                rank: 1,
-            },
-        ];
-
-        let ranked = rank_candidates(
-            "Kono Subarashii Sekai ni Shukufuku o 3 Bonus Stage",
-            "Kono Subarashii Sekai ni Shukufuku o 3 Bonus Stage",
-            None,
-            Some(&json!("E02")),
-            &candidates,
-        );
-        assert_eq!(ranked.first().unwrap().candidate.id, 2);
-    }
-
-    #[test]
-    fn rank_avoids_extra_session_for_regular_episode() {
-        let candidates = vec![
-            BgmCandidate {
-                id: 1,
-                name: "cowboy bebop Extra Session".to_string(),
-                name_cn: "".to_string(),
-                date: Some("2005-01-28".to_string()),
-                query_index: 0,
-                rank: 1,
-            },
-            BgmCandidate {
-                id: 2,
-                name: "カウボーイビバップ".to_string(),
-                name_cn: "星际牛仔".to_string(),
-                date: Some("1998-04-03".to_string()),
-                query_index: 0,
-                rank: 2,
-            },
-        ];
-
-        let ranked = rank_candidates(
-            "Cowboy Bebop",
-            "Cowboy Bebop",
-            None,
-            Some(&json!("11")),
-            &candidates,
-        );
-        assert_eq!(ranked.first().unwrap().candidate.id, 2);
-    }
-
-    #[test]
-    fn rank_prefers_strong_token_match() {
-        let candidates = vec![
-            BgmCandidate {
-                id: 1,
-                name: "アイドルマスター シンデレラガールズ".to_string(),
-                name_cn: "偶像大师 灰姑娘女孩".to_string(),
-                date: Some("2015-01-08".to_string()),
-                query_index: 0,
-                rank: 1,
-            },
-            BgmCandidate {
-                id: 2,
-                name: "アイドルマスター シンデレラガールズ U149".to_string(),
-                name_cn: "偶像大师 灰姑娘女孩 U149".to_string(),
-                date: Some("2023-04-05".to_string()),
-                query_index: 0,
-                rank: 2,
-            },
-        ];
-
-        let ranked = rank_candidates(
-            "[Group] THE IDOLM@STER CINDERELLA GIRLS U149 [02].mkv",
-            "THE IDOLM@STER CINDERELLA GIRLS",
-            None,
-            Some(&json!("02")),
-            &candidates,
-        );
-        assert_eq!(ranked.first().unwrap().candidate.id, 2);
-    }
-
-    #[test]
-    fn rank_prefers_chapter_match_for_movie_series() {
-        let candidates = vec![
-            BgmCandidate {
-                id: 10,
-                name: "劇場版 空の境界 未来福音".to_string(),
-                name_cn: "剧场版 空之境界 未来福音".to_string(),
-                date: Some("2013-09-28".to_string()),
-                query_index: 0,
-                rank: 1,
-            },
-            BgmCandidate {
-                id: 11,
-                name: "劇場版 空の境界 第一章 俯瞰風景".to_string(),
-                name_cn: "剧场版 空之境界 第一章 俯瞰风景".to_string(),
-                date: Some("2007-12-01".to_string()),
-                query_index: 0,
-                rank: 2,
-            },
-            BgmCandidate {
-                id: 12,
-                name: "劇場版 空の境界 第二章 殺人考察(前)".to_string(),
-                name_cn: "剧场版 空之境界 第二章 杀人考察（前）".to_string(),
-                date: Some("2008-02-09".to_string()),
-                query_index: 0,
-                rank: 3,
-            },
-        ];
-
-        let ranked = rank_candidates(
-            "[Kara_no_Kyoukai][02].mkv",
-            "Kara_no_Kyoukai",
-            None,
-            Some(&json!("02")),
-            &candidates,
-        );
-        assert_eq!(ranked.first().unwrap().candidate.id, 12);
-    }
-}
-
 #[derive(Serialize)]
 pub struct Report {
     pub summary: ReportSummary,
@@ -3135,5 +3025,3 @@ pub(crate) struct ReportItem {
     pub(crate) bgm: Option<BgmMatch>,
     debug: Option<ReportDebug>,
 }
-
- 

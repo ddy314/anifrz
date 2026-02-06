@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "anifrz",
+  "version": "0.1.0",
+  "identifier": "com.anifrz.app",
+  "build": {
+    "frontendDist": "src/ui/frontend"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "anifrz",
+        "width": 1080,
+        "height": 760,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

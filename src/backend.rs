@@ -1,10 +1,11 @@
 use crate::matcher::{build_report, fetch_subject_details, llm_parse_list};
-use crate::storage::{ensure_library_dir, load_series, save_series, series_path};
+use crate::storage::LibraryDb;
 use crate::types::{
-    get_string_config, get_u64_env, now_ts, resolve_llm_settings, to_rel_string, Config,
-    FinalMatch, InputItem, LocalEpisode, LocalInfo, MatchOptions, MediaFile, MediaKind,
-    ScrapeSummary, SeriesRecord,
+    Config, FinalMatch, InputItem, LocalEpisode, LocalInfo, MatchOptions, MediaFile, MediaKind,
+    ScrapeSummary, SeriesRecord, get_string_config, get_u64_env, now_ts, resolve_llm_settings,
+    to_rel_string,
 };
+use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ pub enum Command {
     Stop,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum StatusEvent {
     Started { root: String },
     Scanned { total_files: usize },
@@ -28,10 +29,21 @@ pub enum StatusEvent {
     Error { message: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum DataEvent {
-    SeriesSaved { id: i64, path: String },
-    ReportSaved { path: String },
+    DatabaseReady {
+        path: String,
+    },
+    MatchSaved {
+        bgm_id: i64,
+        file_path: String,
+        matched: usize,
+        processed: usize,
+        total: usize,
+    },
+    SeriesSaved {
+        id: i64,
+    },
 }
 
 pub struct BackendHandle {
@@ -106,13 +118,17 @@ async fn run_scrape(
     data_tx: &Sender<DataEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let root_str = root.to_string_lossy().to_string();
     let _ = status_tx.send(StatusEvent::Started {
-        root: root.to_string_lossy().to_string(),
+        root: root_str.clone(),
     });
 
     let library_dir = get_string_config("LIBRARY_DIR", &config.library.dir, "library");
-    let library_path = PathBuf::from(library_dir);
-    ensure_library_dir(&library_path)?;
+    let db = LibraryDb::open(&PathBuf::from(library_dir))?;
+    let _ = data_tx.send(DataEvent::DatabaseReady {
+        path: db.path.to_string_lossy().to_string(),
+    });
+    db.clear_root_matches(&root_str)?;
 
     let match_opts = MatchOptions::from_config(config);
     let media_files = scan_media_files(&root)?;
@@ -166,6 +182,35 @@ async fn run_scrape(
         let _ = status_tx.send(StatusEvent::Matching { current, total });
     };
 
+    let mut matched_saved = 0usize;
+    let mut on_match_error: Option<String> = None;
+    let root_for_match = root_str.clone();
+    let mut on_match = |processed: usize, total: usize, result: Option<&FinalMatch>| {
+        let matched = match result {
+            Some(v) if v.bgm.id.is_some() => v,
+            _ => return,
+        };
+        if on_match_error.is_some() {
+            return;
+        }
+        let bgm_id = match matched.bgm.id {
+            Some(v) => v,
+            None => return,
+        };
+        if let Err(err) = db.upsert_file_match(&root_for_match, matched) {
+            on_match_error = Some(err.to_string());
+            return;
+        }
+        matched_saved += 1;
+        let _ = data_tx.send(DataEvent::MatchSaved {
+            bgm_id,
+            file_path: matched.file_path.clone(),
+            matched: matched_saved,
+            processed,
+            total,
+        });
+    };
+
     let report = build_report(
         llm_settings.provider,
         &llm_settings.base_url,
@@ -180,19 +225,25 @@ async fn run_scrape(
         &match_opts,
         config.llm.match_concurrency,
         Some(&mut progress),
+        Some(&mut on_match),
     )
     .await?;
 
-    let report_path = library_path.join("report.json");
-    fs::write(&report_path, serde_json::to_string_pretty(&report)?)?;
-    let _ = data_tx.send(DataEvent::ReportSaved {
-        path: report_path.to_string_lossy().to_string(),
-    });
+    if let Some(err) = on_match_error.take() {
+        return Err(format!("failed to persist match: {err}").into());
+    }
+
+    db.save_report(&root_str, &serde_json::to_string(&report)?)?;
+    for item in report.final_matches.iter() {
+        if item.bgm.id.is_some() {
+            db.upsert_file_match(&root_str, item)?;
+        }
+    }
 
     let mut matched_files = 0usize;
     let mut skipped_files = 0usize;
     let mut unmatched_files = 0usize;
-    for item in report.items.iter() {
+    for item in &report.items {
         if item.status == "matched" {
             matched_files += 1;
             continue;
@@ -223,13 +274,7 @@ async fn run_scrape(
             total: total_series,
         });
 
-        let mut file_path = find_series_file(&library_path, id);
-        let record = if let Some(ref path) = file_path {
-            load_series(path)?
-        } else {
-            None
-        };
-
+        let record = db.load_series(id)?;
         let now = now_ts();
         let refresh_days = get_u64_env("REFRESH_DAYS", config.library.refresh_days);
         let refresh_secs = refresh_days.saturating_mul(86_400) as i64;
@@ -244,7 +289,12 @@ async fn run_scrape(
             .unwrap_or(true);
         let needs_details = record
             .as_ref()
-            .map(|r| r.name.is_empty() || r.summary.is_empty() || r.tags.is_empty() || r.air_date.is_none())
+            .map(|r| {
+                r.name.is_empty()
+                    || r.summary.is_empty()
+                    || r.tags.is_empty()
+                    || r.air_date.is_none()
+            })
             .unwrap_or(true);
 
         let details = if needs_rating || needs_episodes || needs_details {
@@ -273,9 +323,9 @@ async fn run_scrape(
                 r.episodes.clone(),
             ),
             (None, None) => (
-                "".to_string(),
-                "".to_string(),
-                "".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
                 Vec::new(),
                 None,
                 None,
@@ -287,15 +337,15 @@ async fn run_scrape(
         let mut local_eps = HashSet::new();
         let mut series_unmatched = Vec::new();
         let has_special_eps = episodes.iter().any(|e| e.ep_type != 0);
-        let mut episode_info_map: HashMap<u32, &crate::types::EpisodeInfo> = HashMap::new();
-        for ep in episodes.iter() {
+        let mut episode_info_map = HashMap::new();
+        for ep in &episodes {
             let rounded = ep.sort.round();
             if (ep.sort - rounded).abs() <= 0.01 && rounded >= 1.0 {
                 episode_info_map.insert(rounded as u32, ep);
             }
         }
 
-        for m in matches.iter() {
+        for m in &matches {
             let needs_special = matches!(m.media_kind, MediaKind::Audio)
                 || m.file_size < match_opts.min_media_size_bytes;
             if needs_special && !has_special_eps {
@@ -317,15 +367,17 @@ async fn run_scrape(
             local_eps.insert(episode_num);
             let rel_path = to_rel_string(&root, Path::new(&m.file_path));
             let info = episode_info_map.get(&episode_num);
-            let entry = local_eps_map.entry(episode_num).or_insert_with(|| LocalEpisode {
-                episode: episode_num,
-                name: info.map(|e| e.name.clone()).unwrap_or_else(|| format!("Episode {episode_num}")),
-                name_cn: info
-                    .map(|e| e.name_cn.clone())
-                    .unwrap_or_else(|| "".to_string()),
-                ep_type: info.map(|e| e.ep_type).unwrap_or(0),
-                files: Vec::new(),
-            });
+            let entry = local_eps_map
+                .entry(episode_num)
+                .or_insert_with(|| LocalEpisode {
+                    episode: episode_num,
+                    name: info
+                        .map(|e| e.name.clone())
+                        .unwrap_or_else(|| format!("Episode {episode_num}")),
+                    name_cn: info.map(|e| e.name_cn.clone()).unwrap_or_default(),
+                    ep_type: info.map(|e| e.ep_type).unwrap_or(0),
+                    files: Vec::new(),
+                });
             entry.files.push(rel_path);
         }
 
@@ -337,16 +389,16 @@ async fn run_scrape(
                 main_eps.insert(rounded as u32);
             }
         }
-        for ep in main_eps.iter() {
-            if !local_eps.contains(ep) {
-                missing_eps.push(*ep);
+        for ep in main_eps {
+            if !local_eps.contains(&ep) {
+                missing_eps.push(ep);
             }
         }
 
         let mut local_episodes: Vec<LocalEpisode> = local_eps_map.into_values().collect();
         local_episodes.sort_by_key(|e| e.episode);
         let local = LocalInfo {
-            root: root.to_string_lossy().to_string(),
+            root: root_str.clone(),
             episodes: local_episodes,
             missing_episodes: missing_eps,
             unmatched_files: series_unmatched,
@@ -360,33 +412,28 @@ async fn run_scrape(
         let episodes_updated_at = if details.is_some() || record.is_none() {
             now
         } else {
-            record.as_ref().map(|r| r.episodes_updated_at).unwrap_or(now)
+            record
+                .as_ref()
+                .map(|r| r.episodes_updated_at)
+                .unwrap_or(now)
         };
 
         let record = SeriesRecord {
             id,
-            name: name.clone(),
-            name_cn: name_cn.clone(),
-            summary: summary.clone(),
-            tags: tags.clone(),
-            air_date: air_date.clone(),
-            rating: rating.clone(),
-            episodes: episodes.clone(),
+            name,
+            name_cn,
+            summary,
+            tags,
+            air_date,
+            rating,
+            episodes,
             local,
             updated_at: now,
             rating_updated_at,
             episodes_updated_at,
         };
-
-        let path = match file_path.take() {
-            Some(existing) => existing,
-            None => series_path(&library_path, id, &name_cn),
-        };
-        save_series(&path, &record)?;
-        let _ = data_tx.send(DataEvent::SeriesSaved {
-            id,
-            path: path.to_string_lossy().to_string(),
-        });
+        db.upsert_series(&record)?;
+        let _ = data_tx.send(DataEvent::SeriesSaved { id });
     }
 
     let summary = ScrapeSummary {
@@ -401,27 +448,18 @@ async fn run_scrape(
     Ok(())
 }
 
-fn find_series_file(library_dir: &Path, id: i64) -> Option<PathBuf> {
-    let prefix = format!("{id}_");
-    let simple = format!("{id}.json");
-    let entries = fs::read_dir(library_dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name == simple || name.starts_with(&prefix) {
-            return Some(entry.path());
-        }
-    }
-    None
-}
-
-fn scan_media_files(root: &Path) -> Result<Vec<MediaFile>, Box<dyn std::error::Error + Send + Sync>> {
+fn scan_media_files(
+    root: &Path,
+) -> Result<Vec<MediaFile>, Box<dyn std::error::Error + Send + Sync>> {
     let mut out = Vec::new();
     scan_dir(root, &mut out)?;
     Ok(out)
 }
 
-fn scan_dir(root: &Path, out: &mut Vec<MediaFile>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn scan_dir(
+    root: &Path,
+    out: &mut Vec<MediaFile>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !root.exists() {
         return Ok(());
     }
@@ -430,7 +468,7 @@ fn scan_dir(root: &Path, out: &mut Vec<MediaFile>) -> Result<(), Box<dyn std::er
     }
     for entry in fs::read_dir(root)? {
         let entry = match entry {
-            Ok(e) => e,
+            Ok(v) => v,
             Err(_) => continue,
         };
         let path = entry.path();
@@ -458,7 +496,9 @@ fn classify_media(path: &Path) -> Option<MediaKind> {
     let video_exts = [
         "mkv", "mp4", "avi", "mov", "flv", "wmv", "mpg", "mpeg", "m2ts", "ts", "webm",
     ];
-    let audio_exts = ["flac", "mp3", "aac", "ogg", "opus", "wav", "m4a", "ape", "alac"];
+    let audio_exts = [
+        "flac", "mp3", "aac", "ogg", "opus", "wav", "m4a", "ape", "alac",
+    ];
     if video_exts.iter().any(|e| *e == ext) {
         Some(MediaKind::Video)
     } else if audio_exts.iter().any(|e| *e == ext) {

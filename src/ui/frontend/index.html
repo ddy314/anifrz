@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>anifrz</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="panel control">
+        <h1>anifrz</h1>
+        <p>本地媒体刮削状态面板</p>
+        <div class="actions">
+          <input id="rootPath" placeholder="输入本地媒体目录，例如 /data/anime" />
+          <button id="startBtn">开始刮削</button>
+          <button id="reloadBtn">刷新结果</button>
+        </div>
+      </section>
+
+      <section class="panel status">
+        <h2>进度</h2>
+        <div id="statusText" class="status-text">空闲</div>
+        <div id="metrics" class="metrics"></div>
+      </section>
+
+      <section class="panel logs">
+        <h2>实时事件</h2>
+        <pre id="eventLog"></pre>
+      </section>
+
+      <section class="panel result">
+        <h2>作品结果</h2>
+        <div id="seriesList" class="series-list"></div>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -2,12 +2,16 @@ mod backend;
 mod matcher;
 mod storage;
 mod types;
+mod ui;
 
-use backend::{start_backend, Command, DataEvent, StatusEvent};
+use backend::{Command, DataEvent, StatusEvent, start_backend};
 use matcher::{bgm_search, build_report, llm_parse_list, read_samples};
 use std::env;
 use std::path::PathBuf;
-use types::{get_string_config, get_u64_env, load_config, resolve_llm_settings, MatchOptions, MediaFile, MediaKind, InputItem};
+use types::{
+    InputItem, MatchOptions, MediaFile, MediaKind, get_string_config, get_u64_env, load_config,
+    resolve_llm_settings,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = load_config();
@@ -23,7 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         Some("bgm") => {
             let title = args.next().ok_or("missing title")?;
-            let base_url = get_string_config("BGM_BASE_URL", &config.bgm.base_url, "https://api.bgm.tv");
+            let base_url =
+                get_string_config("BGM_BASE_URL", &config.bgm.base_url, "https://api.bgm.tv");
             let token = env::var("BGM_TOKEN")
                 .ok()
                 .or_else(|| config.bgm.token.clone())
@@ -76,7 +81,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 })
                 .collect();
 
-            let bgm_base = get_string_config("BGM_BASE_URL", &config.bgm.base_url, "https://api.bgm.tv");
+            let bgm_base =
+                get_string_config("BGM_BASE_URL", &config.bgm.base_url, "https://api.bgm.tv");
             let bgm_token = env::var("BGM_TOKEN")
                 .ok()
                 .or_else(|| config.bgm.token.clone())
@@ -101,10 +107,14 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 &MatchOptions::from_config(&config),
                 config.llm.match_concurrency,
                 None,
+                None,
             ))?;
 
             std::fs::write(&output_path, serde_json::to_string_pretty(&report)?)?;
             println!("report saved to {}", output_path.display());
+        }
+        Some("gui") => {
+            ui::run_gui(config.clone())?;
         }
         Some("help") | None => {
             print_help();
@@ -117,7 +127,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-fn run_scrape_cmd(config: &types::Config, root: PathBuf) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_scrape_cmd(
+    config: &types::Config,
+    root: PathBuf,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let backend = start_backend(config.clone());
     backend.send(Command::Scrape { root })?;
 
@@ -158,11 +171,23 @@ fn run_scrape_cmd(config: &types::Config, root: PathBuf) -> Result<(), Box<dyn s
 
         while let Ok(data) = backend.data_rx.try_recv() {
             match data {
-                DataEvent::SeriesSaved { id, path } => {
-                    println!("已保存条目 {id}: {path}");
+                DataEvent::DatabaseReady { path } => {
+                    println!("数据库: {path}");
                 }
-                DataEvent::ReportSaved { path } => {
-                    println!("已保存报告: {path}");
+                DataEvent::MatchSaved {
+                    bgm_id,
+                    file_path,
+                    matched,
+                    processed,
+                    total,
+                } => {
+                    println!(
+                        "匹配已入库: bgm={} file={} ({}/{}, matched={})",
+                        bgm_id, file_path, processed, total, matched
+                    );
+                }
+                DataEvent::SeriesSaved { id } => {
+                    println!("已更新作品: {id}");
                 }
             }
         }
@@ -177,6 +202,7 @@ fn print_help() {
     println!("  anifrz scrape <media_dir>");
     println!("  anifrz bgm <title>");
     println!("  anifrz report [input.txt] [report.json]");
+    println!("  anifrz gui");
     println!();
     println!("Configuration:");
     println!("  优先级: 环境变量 > config.toml > 默认值");
