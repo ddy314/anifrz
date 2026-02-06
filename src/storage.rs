@@ -93,9 +93,10 @@ impl LibraryDb {
         self.conn.execute(
             "INSERT INTO series_records(
                 id, name, name_cn, summary, tags_json, air_date, rating_json, episodes_json,
-                local_json, updated_at, rating_updated_at, episodes_updated_at
+                local_json, cover_url, cover_local_path, updated_at, rating_updated_at,
+                episodes_updated_at, cover_updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 name_cn = excluded.name_cn,
@@ -105,9 +106,12 @@ impl LibraryDb {
                 rating_json = excluded.rating_json,
                 episodes_json = excluded.episodes_json,
                 local_json = excluded.local_json,
+                cover_url = excluded.cover_url,
+                cover_local_path = excluded.cover_local_path,
                 updated_at = excluded.updated_at,
                 rating_updated_at = excluded.rating_updated_at,
-                episodes_updated_at = excluded.episodes_updated_at",
+                episodes_updated_at = excluded.episodes_updated_at,
+                cover_updated_at = excluded.cover_updated_at",
             params![
                 record.id,
                 record.name,
@@ -122,9 +126,12 @@ impl LibraryDb {
                     .transpose()?,
                 to_json(&record.episodes)?,
                 to_json(&record.local)?,
+                record.cover_url.clone(),
+                record.cover_local_path.clone(),
                 record.updated_at,
                 record.rating_updated_at,
                 record.episodes_updated_at,
+                record.cover_updated_at,
             ],
         )?;
         Ok(())
@@ -137,7 +144,8 @@ impl LibraryDb {
         let mut stmt = self.conn.prepare(
             "SELECT
                 id, name, name_cn, summary, tags_json, air_date, rating_json, episodes_json,
-                local_json, updated_at, rating_updated_at, episodes_updated_at
+                local_json, cover_url, cover_local_path, updated_at, rating_updated_at,
+                episodes_updated_at, cover_updated_at
             FROM series_records
             WHERE id = ?1",
         )?;
@@ -161,9 +169,12 @@ impl LibraryDb {
                         .map_err(to_sql_err)?,
                     episodes: from_json(&episodes_json).map_err(to_sql_err)?,
                     local: from_json(&local_json).map_err(to_sql_err)?,
-                    updated_at: row.get(9)?,
-                    rating_updated_at: row.get(10)?,
-                    episodes_updated_at: row.get(11)?,
+                    cover_url: row.get(9)?,
+                    cover_local_path: row.get(10)?,
+                    updated_at: row.get(11)?,
+                    rating_updated_at: row.get(12)?,
+                    episodes_updated_at: row.get(13)?,
+                    cover_updated_at: row.get(14)?,
                 })
             })
             .optional()?;
@@ -178,7 +189,8 @@ impl LibraryDb {
         let mut stmt = self.conn.prepare(
             "SELECT
                 id, name, name_cn, summary, tags_json, air_date, rating_json, episodes_json,
-                local_json, updated_at, rating_updated_at, episodes_updated_at
+                local_json, cover_url, cover_local_path, updated_at, rating_updated_at,
+                episodes_updated_at, cover_updated_at
             FROM series_records
             ORDER BY updated_at DESC
             LIMIT ?1",
@@ -201,9 +213,12 @@ impl LibraryDb {
                 rating: rating_json.as_deref().map(from_json).transpose()?,
                 episodes: from_json(&episodes_json)?,
                 local: from_json(&local_json)?,
-                updated_at: row.get(9)?,
-                rating_updated_at: row.get(10)?,
-                episodes_updated_at: row.get(11)?,
+                cover_url: row.get(9)?,
+                cover_local_path: row.get(10)?,
+                updated_at: row.get(11)?,
+                rating_updated_at: row.get(12)?,
+                episodes_updated_at: row.get(13)?,
+                cover_updated_at: row.get(14)?,
             });
         }
         Ok(out)
@@ -236,9 +251,12 @@ impl LibraryDb {
                 rating_json TEXT,
                 episodes_json TEXT NOT NULL,
                 local_json TEXT NOT NULL,
+                cover_url TEXT,
+                cover_local_path TEXT,
                 updated_at INTEGER NOT NULL,
                 rating_updated_at INTEGER NOT NULL,
-                episodes_updated_at INTEGER NOT NULL
+                episodes_updated_at INTEGER NOT NULL,
+                cover_updated_at INTEGER NOT NULL DEFAULT 0
              );
 
              CREATE TABLE IF NOT EXISTS file_matches (
@@ -267,6 +285,27 @@ impl LibraryDb {
                 created_at INTEGER NOT NULL
              );",
         )?;
+        self.ensure_series_column("cover_url", "TEXT")?;
+        self.ensure_series_column("cover_local_path", "TEXT")?;
+        self.ensure_series_column("cover_updated_at", "INTEGER NOT NULL DEFAULT 0")?;
+        Ok(())
+    }
+
+    fn ensure_series_column(
+        &self,
+        column: &str,
+        ddl: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(series_records)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(());
+            }
+        }
+        let sql = format!("ALTER TABLE series_records ADD COLUMN {column} {ddl}");
+        self.conn.execute(&sql, [])?;
         Ok(())
     }
 }

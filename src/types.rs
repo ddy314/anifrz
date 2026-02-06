@@ -320,6 +320,7 @@ pub struct SubjectDetails {
     pub air_date: Option<String>,
     pub rating: Option<Rating>,
     pub episodes: Vec<EpisodeInfo>,
+    pub cover_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,9 +354,12 @@ pub struct SeriesRecord {
     pub rating: Option<Rating>,
     pub episodes: Vec<EpisodeInfo>,
     pub local: LocalInfo,
+    pub cover_url: Option<String>,
+    pub cover_local_path: Option<String>,
     pub updated_at: i64,
     pub rating_updated_at: i64,
     pub episodes_updated_at: i64,
+    pub cover_updated_at: i64,
 }
 
 #[derive(Serialize, Clone)]

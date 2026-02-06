@@ -1,97 +1,33 @@
-这是一个简单的基于rust的本地番剧媒体库管理工具。
+# anifrz
 
-## 功能
-- 扫描本地番剧文件夹，自动识别番剧信息
-- 支持多种视频格式
-- 后端使用 SQLite 本地数据库持久化存储
-- 父目录名为 `sp`/`sps`/`special`/`cd` 时会直接跳过，不进入 LLM
-- 匹配阶段实时入库（匹配到确定结果即写入 `file_matches`），便于前端感知进度
+本地番剧媒体库工具，**媒体刮削仍是核心流程**，前端用于展示和播放。
 
-## 技术
-- 采用LLM做文件名解析（支持批处理大量文件）
-- 采用BGM API获取番剧元信息
+## 当前设计
 
-## 使用方法
+- 核心后端：`scrape` 刮削流程（扫描 -> LLM 解析 -> BGM 匹配 -> SQLite 落库）
+- 缓存能力：
+  - 作品信息缓存（名称、简介、标签、评分、剧集、刷新时间）
+  - 作品图片缓存（封面下载到本地 `library/covers/`，支持刷新周期）
+- 前端能力：
+  - 作品墙
+  - 作品详情（简介、标签、评分、本地剧集、缺失剧集）
+  - 点击剧集文件自动唤起系统播放器
+- 日志接口：统一通过 `read_logs` 拉取（前端轮询展示）
 
-### 配置
-
-支持两种配置方式，优先级为：**环境变量 > config.toml > 默认值**  
-LLM 相关配置仅读取 `config.toml`（不再从环境变量读取）。
-
-#### 方式 1: 使用配置文件（推荐）
-
-复制示例配置文件并编辑：
-```bash
-cp config.toml.example config.toml
-```
-
-编辑 `config.toml`：
-```toml
-[bgm]
-base_url = "https://api.bgm.tv"
-token = "your_bgm_token_here"  # 从 https://bgm.tv/dev/app 获取
-limit = 20
-
-[llm]
-url = "http://127.0.0.1:11434"
-provider = "ollama" # ollama / openai
-remote_url = "" # OpenAI 兼容地址
-remote_token = "" # OpenAI 兼容 Token
-model = "qwen3:4b"
-batch_size = 15  # 每批处理的文件名数量
-match_concurrency = 4 # 匹配阶段并发数
-
-[library]
-dir = "library"  # 持久化目录（数据库路径默认: library/anifrz.db；也可直接填 *.db 文件）
-refresh_days = 7 # 评分与集信息刷新周期
-
-[media]
-min_media_size_mb = 30 # 小于该阈值的文件默认不参与匹配
-```
-
-#### 方式 2: 使用环境变量
+## 启动
 
 ```bash
-export BGM_BASE_URL=https://api.bgm.tv
-export BGM_TOKEN=your_token_here
-export BGM_LIMIT=20
-export BGM_TIMEOUT_SECS=20
-export BGM_RETRY=0
-export BGM_RETRY_DELAY_MS=500
-export BGM_DEBUG=0
-export BGM_TOLERATE_ERRORS=0
-export LIBRARY_DIR=library
-export REFRESH_DAYS=7
-export MIN_MEDIA_SIZE_MB=30
-```
-
-说明：
-- `BGM_DEBUG=1` 会输出每个请求的日志（便于定位网络或接口错误）
-- `BGM_TOLERATE_ERRORS=1` 会在 BGM 请求失败时继续匹配其它条目
-- `BGM_RETRY` / `BGM_RETRY_DELAY_MS` 控制重试次数与间隔（毫秒）
-- `BGM_TIMEOUT_SECS` 控制 BGM 请求超时时间
-
-### 运行
-```bash
-# 启动 Ollama 服务
-ollama serve
-
-# 一键刮削（目录内媒体将自动匹配并写入 library/）
+# 仅刮削（命令行）
 cargo run -- scrape /path/to/media
 
-# 生成报告（仍保留原有命令）
-cargo run -- report [input.txt] [output.json]
-
-# 启动最小 Tauri 前端（需要启用 tauri-ui feature）
+# 前端应用（Tauri）
 cargo run --features tauri-ui -- gui
 ```
 
-## 批处理说明
+## 配置
 
-当处理大量文件名时（超过 15 个），程序会自动将它们分批发送给 LLM 处理，以提高准确性：
-- 默认每批处理 15 个文件名
-- 可通过 `config.toml` 的 `llm.batch_size` 调整批次大小
-- 对于小模型（如 qwen3:4b），建议使用较小的批次（10-15）
-- 对于大模型（如 qwen2.5:32b），可以增加到 30-50
+优先级：`环境变量 > config.toml > 默认值`
 
-这样可以避免小模型在处理过多文件时出现遗漏或错误。
+- `BGM_TOKEN` 建议放在环境变量
+- `LIBRARY_DIR` 可指定数据库目录（默认 `library`）
+- `REFRESH_DAYS` 控制作品信息和封面刷新周期

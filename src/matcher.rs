@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -249,6 +248,7 @@ async fn fetch_subject_v0(
             count,
         }
     });
+    let cover_url = parse_cover_url(&v);
 
     Ok(SubjectDetails {
         name,
@@ -258,6 +258,7 @@ async fn fetch_subject_v0(
         air_date,
         rating,
         episodes: Vec::new(),
+        cover_url,
     })
 }
 
@@ -360,6 +361,7 @@ async fn fetch_subject_legacy(
         .and_then(|v| v.as_array())
         .map(|arr| parse_episode_list(arr))
         .unwrap_or_default();
+    let cover_url = parse_cover_url(&v);
 
     Ok(SubjectDetails {
         name,
@@ -369,6 +371,7 @@ async fn fetch_subject_legacy(
         air_date,
         rating,
         episodes,
+        cover_url,
     })
 }
 
@@ -432,15 +435,18 @@ fn parse_episode_list(arr: &[Value]) -> Vec<EpisodeInfo> {
     episodes
 }
 
-pub fn read_samples(
-    path: &PathBuf,
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let text = fs::read_to_string(path)?;
-    Ok(text
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect())
+fn parse_cover_url(v: &Value) -> Option<String> {
+    let images = v.get("images")?;
+    let keys = ["large", "common", "medium", "small", "grid"];
+    for key in keys {
+        if let Some(url) = images.get(key).and_then(|x| x.as_str()) {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
 }
 
 pub async fn llm_parse_list(
