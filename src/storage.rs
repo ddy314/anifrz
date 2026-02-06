@@ -1,7 +1,10 @@
-use crate::types::{FinalMatch, SeriesRecord, now_ts};
+use crate::types::{
+    BgmMatch, CachedFileMatch, FinalMatch, LocalInfo, MediaKind, SeriesRecord, now_ts,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -38,12 +41,88 @@ impl LibraryDb {
         Ok(())
     }
 
+    pub fn clear_root_series(
+        &self,
+        root: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, local_json FROM series_records")?;
+        let mut rows = stmt.query([])?;
+        let mut ids = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let local_json: String = row.get(1)?;
+            let local = match from_json::<LocalInfo>(&local_json) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if local.root == root {
+                ids.push(id);
+            }
+        }
+
+        for id in ids {
+            self.conn
+                .execute("DELETE FROM series_records WHERE id = ?1", params![id])?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_series(&self, id: i64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.conn
+            .execute("DELETE FROM series_records WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    #[cfg(feature = "tauri-ui")]
+    pub fn clear_series_match_records(
+        &self,
+        root: &str,
+        bgm_id: i64,
+        file_paths: &[String],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.conn.execute(
+            "DELETE FROM file_matches WHERE root_path = ?1 AND bgm_id = ?2",
+            params![root, bgm_id],
+        )?;
+
+        for file_path in file_paths {
+            self.conn.execute(
+                "DELETE FROM file_matches WHERE file_path = ?1",
+                params![file_path],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn upsert_file_match(
         &self,
         root: &str,
         item: &FinalMatch,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let llm_episode_json = item
+        let row = CachedFileMatch {
+            root_path: root.to_string(),
+            file_path: item.file_path.clone(),
+            input: item.input.clone(),
+            file_size: item.file_size,
+            file_fingerprint: item.file_fingerprint.clone(),
+            media_kind: item.media_kind.clone(),
+            llm_title: item.llm_title.clone(),
+            llm_episode: item.llm_episode.clone(),
+            episode_number: item.episode_number,
+            bgm: item.bgm.clone(),
+            status: "matched".to_string(),
+        };
+        self.upsert_cached_file_match(&row)
+    }
+
+    pub fn upsert_cached_file_match(
+        &self,
+        row: &CachedFileMatch,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let llm_episode_json = row
             .llm_episode
             .as_ref()
             .map(serde_json::to_string)
@@ -51,9 +130,10 @@ impl LibraryDb {
         self.conn.execute(
             "INSERT INTO file_matches(
                 root_path, file_path, input, file_size, media_kind, llm_title, llm_episode_json,
-                episode_number, bgm_id, bgm_name, bgm_name_cn, bgm_date, updated_at
+                episode_number, bgm_id, bgm_name, bgm_name_cn, bgm_date, match_status,
+                file_fingerprint, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             ON CONFLICT(file_path) DO UPDATE SET
                 root_path = excluded.root_path,
                 input = excluded.input,
@@ -66,22 +146,82 @@ impl LibraryDb {
                 bgm_name = excluded.bgm_name,
                 bgm_name_cn = excluded.bgm_name_cn,
                 bgm_date = excluded.bgm_date,
+                match_status = excluded.match_status,
+                file_fingerprint = excluded.file_fingerprint,
                 updated_at = excluded.updated_at",
             params![
-                root,
-                item.file_path,
-                item.input,
-                item.file_size as i64,
-                item.media_kind.as_str(),
-                item.llm_title,
+                row.root_path.as_str(),
+                row.file_path.as_str(),
+                row.input.as_str(),
+                row.file_size as i64,
+                row.media_kind.as_str(),
+                row.llm_title.as_str(),
                 llm_episode_json,
-                item.episode_number.map(|v| v as i64),
-                item.bgm.id,
-                item.bgm.name,
-                item.bgm.name_cn,
-                item.bgm.date,
+                row.episode_number.map(|v| v as i64),
+                row.bgm.id,
+                row.bgm.name.clone(),
+                row.bgm.name_cn.clone(),
+                row.bgm.date.clone(),
+                row.status.as_str(),
+                row.file_fingerprint.as_str(),
                 now_ts(),
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_root_file_matches(
+        &self,
+        root: &str,
+    ) -> Result<Vec<CachedFileMatch>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                root_path, file_path, input, file_size, media_kind, llm_title, llm_episode_json,
+                episode_number, bgm_id, bgm_name, bgm_name_cn, bgm_date, match_status,
+                file_fingerprint
+            FROM file_matches
+            WHERE root_path = ?1",
+        )?;
+        let mut rows = stmt.query(params![root])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let llm_episode_json: Option<String> = row.get(6)?;
+            let llm_episode = llm_episode_json
+                .as_deref()
+                .map(from_json::<Value>)
+                .transpose()?;
+            let episode_number: Option<i64> = row.get(7)?;
+            let media_kind: String = row.get(4)?;
+            let bgm_id: Option<i64> = row.get(8)?;
+            out.push(CachedFileMatch {
+                root_path: row.get(0)?,
+                file_path: row.get(1)?,
+                input: row.get(2)?,
+                file_size: row.get::<_, i64>(3)? as u64,
+                media_kind: parse_media_kind(&media_kind),
+                llm_title: row.get(5)?,
+                llm_episode,
+                episode_number: episode_number.map(|v| v as u32),
+                bgm: BgmMatch {
+                    id: bgm_id,
+                    name: row.get(9)?,
+                    name_cn: row.get(10)?,
+                    date: row.get(11)?,
+                },
+                status: row.get(12)?,
+                file_fingerprint: row.get(13)?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn delete_file_match(
+        &self,
+        file_path: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.conn.execute(
+            "DELETE FROM file_matches WHERE file_path = ?1",
+            params![file_path],
         )?;
         Ok(())
     }
@@ -272,6 +412,8 @@ impl LibraryDb {
                 bgm_name TEXT,
                 bgm_name_cn TEXT,
                 bgm_date TEXT,
+                match_status TEXT NOT NULL DEFAULT 'matched',
+                file_fingerprint TEXT NOT NULL DEFAULT '',
                 updated_at INTEGER NOT NULL
              );
 
@@ -288,6 +430,8 @@ impl LibraryDb {
         self.ensure_series_column("cover_url", "TEXT")?;
         self.ensure_series_column("cover_local_path", "TEXT")?;
         self.ensure_series_column("cover_updated_at", "INTEGER NOT NULL DEFAULT 0")?;
+        self.ensure_file_match_column("match_status", "TEXT NOT NULL DEFAULT 'matched'")?;
+        self.ensure_file_match_column("file_fingerprint", "TEXT NOT NULL DEFAULT ''")?;
         Ok(())
     }
 
@@ -305,6 +449,24 @@ impl LibraryDb {
             }
         }
         let sql = format!("ALTER TABLE series_records ADD COLUMN {column} {ddl}");
+        self.conn.execute(&sql, [])?;
+        Ok(())
+    }
+
+    fn ensure_file_match_column(
+        &self,
+        column: &str,
+        ddl: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(file_matches)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(());
+            }
+        }
+        let sql = format!("ALTER TABLE file_matches ADD COLUMN {column} {ddl}");
         self.conn.execute(&sql, [])?;
         Ok(())
     }
@@ -342,4 +504,12 @@ fn to_sql_err(err: Box<dyn std::error::Error + Send + Sync>) -> rusqlite::Error 
             err.to_string(),
         )),
     )
+}
+
+fn parse_media_kind(v: &str) -> MediaKind {
+    if v.eq_ignore_ascii_case("audio") {
+        MediaKind::Audio
+    } else {
+        MediaKind::Video
+    }
 }

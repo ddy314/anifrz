@@ -1,17 +1,23 @@
+use crate::incremental::build_incremental_plan;
 use crate::matcher::{build_report, fetch_subject_details, llm_parse_list};
 use crate::storage::LibraryDb;
 use crate::types::{
-    Config, FinalMatch, InputItem, LocalEpisode, LocalInfo, MatchOptions, MediaFile, MediaKind,
-    ScrapeSummary, SeriesRecord, get_string_config, get_u64_env, now_ts, resolve_llm_settings,
-    to_rel_string,
+    BgmMatch, CachedFileMatch, Config, FinalMatch, LocalEpisode, LocalInfo, MatchOptions,
+    MediaFile, MediaKind, ScrapeSummary, SeriesRecord, SubjectDetails, get_string_config,
+    get_u64_env, now_ts, resolve_llm_settings, to_rel_string,
 };
 use reqwest::Client;
 use serde::Serialize;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::UNIX_EPOCH;
 
 #[derive(Debug)]
 pub enum Command {
@@ -137,7 +143,6 @@ async fn run_scrape(
     if !cover_cache_dir.exists() {
         fs::create_dir_all(&cover_cache_dir)?;
     }
-    db.clear_root_matches(&root_str)?;
 
     let match_opts = MatchOptions::from_config(config);
     let media_files = scan_media_files(&root)?;
@@ -157,131 +162,215 @@ async fn run_scrape(
         return Ok(());
     }
 
-    let inputs: Vec<InputItem> = media_files
-        .iter()
-        .cloned()
-        .map(|file| InputItem { file })
-        .collect();
-    let samples: Vec<String> = inputs.iter().map(|i| i.file.name.clone()).collect();
+    let existing_rows = db.list_root_file_matches(&root_str)?;
+    let plan = build_incremental_plan(&media_files, &existing_rows);
+    let _unchanged_count = plan.unchanged.len();
+    for row in &plan.removed {
+        db.delete_file_match(&row.file_path)?;
+    }
 
-    let _ = status_tx.send(StatusEvent::LlmParsing {
-        total_files: samples.len(),
-    });
-
-    let llm_settings = resolve_llm_settings(config)?;
-    let llm_items = llm_parse_list(
-        llm_settings.provider,
-        &llm_settings.base_url,
-        llm_settings.token.as_deref(),
-        &llm_settings.model,
-        &samples,
-        config.llm.batch_size,
-    )
-    .await?;
+    let mut affected_series_ids = plan.affected_series_ids.clone();
+    for row in &plan.replaced {
+        if let Some(id) = row.bgm.id {
+            affected_series_ids.insert(id);
+        }
+    }
 
     let bgm_base = get_string_config("BGM_BASE_URL", &config.bgm.base_url, "https://api.bgm.tv");
-    let bgm_token = std::env::var("BGM_TOKEN")
-        .ok()
-        .or_else(|| config.bgm.token.clone())
-        .ok_or("missing BGM_TOKEN (set in config.toml or environment)")?;
-    let bgm_limit = get_u64_env("BGM_LIMIT", config.bgm.limit as u64) as usize;
-    let bgm_retries = get_u64_env("BGM_RETRY", config.bgm.retries as u64) as usize;
+    let mut bgm_token = String::new();
+    let mut bgm_retries = get_u64_env("BGM_RETRY", config.bgm.retries as u64) as usize;
 
-    let mut progress = |current: usize, total: usize| {
-        let _ = status_tx.send(StatusEvent::Matching { current, total });
-    };
+    if !plan.to_process.is_empty() {
+        let inputs = plan.to_process.clone();
+        let samples: Vec<String> = inputs.iter().map(|i| i.file.name.clone()).collect();
+        let mut fingerprint_by_path: HashMap<String, String> = HashMap::new();
+        for input in &inputs {
+            fingerprint_by_path.insert(
+                input.file.path.to_string_lossy().to_string(),
+                input.file.fingerprint.clone(),
+            );
+        }
 
-    let mut matched_saved = 0usize;
-    let mut on_match_error: Option<String> = None;
-    let root_for_match = root_str.clone();
-    let mut on_match = |processed: usize, total: usize, result: Option<&FinalMatch>| {
-        let matched = match result {
-            Some(v) if v.bgm.id.is_some() => v,
-            _ => return,
-        };
-        if on_match_error.is_some() {
-            return;
-        }
-        let bgm_id = match matched.bgm.id {
-            Some(v) => v,
-            None => return,
-        };
-        if let Err(err) = db.upsert_file_match(&root_for_match, matched) {
-            on_match_error = Some(err.to_string());
-            return;
-        }
-        matched_saved += 1;
-        let _ = data_tx.send(DataEvent::MatchSaved {
-            bgm_id,
-            file_path: matched.file_path.clone(),
-            matched: matched_saved,
-            processed,
-            total,
+        let _ = status_tx.send(StatusEvent::LlmParsing {
+            total_files: samples.len(),
         });
-    };
 
-    let report = build_report(
-        llm_settings.provider,
-        &llm_settings.base_url,
-        llm_settings.token.as_deref(),
-        &llm_settings.model,
-        &bgm_base,
-        &bgm_token,
-        bgm_limit,
-        bgm_retries,
-        &inputs,
-        &llm_items,
-        &match_opts,
-        config.llm.match_concurrency,
-        Some(&mut progress),
-        Some(&mut on_match),
-    )
-    .await?;
+        let llm_settings = resolve_llm_settings(config)?;
+        let llm_items = llm_parse_list(
+            llm_settings.provider,
+            &llm_settings.base_url,
+            llm_settings.token.as_deref(),
+            &llm_settings.model,
+            &samples,
+            config.llm.batch_size,
+        )
+        .await?;
 
-    if let Some(err) = on_match_error.take() {
-        return Err(format!("failed to persist match: {err}").into());
+        bgm_token = std::env::var("BGM_TOKEN")
+            .ok()
+            .or_else(|| config.bgm.token.clone())
+            .ok_or("missing BGM_TOKEN (set in config.toml or environment)")?;
+        let bgm_limit = get_u64_env("BGM_LIMIT", config.bgm.limit as u64) as usize;
+        bgm_retries = get_u64_env("BGM_RETRY", config.bgm.retries as u64) as usize;
+
+        let progress_done = Arc::new(AtomicUsize::new(0));
+        let progress_done_hb = progress_done.clone();
+        let progress_stop = Arc::new(AtomicBool::new(false));
+        let progress_stop_hb = progress_stop.clone();
+        let status_tx_hb = status_tx.clone();
+        let total_for_hb = inputs.len();
+        let heartbeat = tokio::spawn(async move {
+            while !progress_stop_hb.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if progress_stop_hb.load(Ordering::Relaxed) {
+                    break;
+                }
+                let current = progress_done_hb.load(Ordering::Relaxed);
+                let _ = status_tx_hb.send(StatusEvent::Matching {
+                    current,
+                    total: total_for_hb,
+                });
+            }
+        });
+
+        let mut progress = |current: usize, total: usize| {
+            progress_done.store(current, Ordering::Relaxed);
+            let _ = status_tx.send(StatusEvent::Matching { current, total });
+        };
+        let _ = status_tx.send(StatusEvent::Matching {
+            current: 0,
+            total: inputs.len(),
+        });
+        let mut matched_saved = 0usize;
+        let mut on_match = |processed: usize, total: usize, result: Option<&FinalMatch>| {
+            let matched = match result {
+                Some(v) if v.bgm.id.is_some() => v,
+                _ => return,
+            };
+            let bgm_id = match matched.bgm.id {
+                Some(v) => v,
+                None => return,
+            };
+            matched_saved += 1;
+            let _ = data_tx.send(DataEvent::MatchSaved {
+                bgm_id,
+                file_path: matched.file_path.clone(),
+                matched: matched_saved,
+                processed,
+                total,
+            });
+        };
+
+        let report = match build_report(
+            llm_settings.provider,
+            &llm_settings.base_url,
+            llm_settings.token.as_deref(),
+            &llm_settings.model,
+            &bgm_base,
+            &bgm_token,
+            bgm_limit,
+            bgm_retries,
+            &inputs,
+            &llm_items,
+            &match_opts,
+            config.llm.match_concurrency,
+            Some(&mut progress),
+            Some(&mut on_match),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(err) => {
+                progress_stop.store(true, Ordering::Relaxed);
+                let _ = heartbeat.await;
+                return Err(err);
+            }
+        };
+        progress_stop.store(true, Ordering::Relaxed);
+        let _ = heartbeat.await;
+
+        db.save_report(&root_str, &serde_json::to_string(&report)?)?;
+
+        let mut ep_by_path: HashMap<String, Option<u32>> = HashMap::new();
+        for fm in &report.final_matches {
+            ep_by_path.insert(fm.file_path.clone(), fm.episode_number);
+        }
+
+        for item in report.items {
+            let bgm = item.bgm.unwrap_or(BgmMatch {
+                id: None,
+                name: None,
+                name_cn: None,
+                date: None,
+            });
+            if let Some(id) = bgm.id {
+                affected_series_ids.insert(id);
+            }
+            let row = CachedFileMatch {
+                root_path: root_str.clone(),
+                file_path: item.file_path.clone(),
+                input: item.input,
+                file_size: item.file_size,
+                file_fingerprint: fingerprint_by_path
+                    .get(&item.file_path)
+                    .cloned()
+                    .unwrap_or_default(),
+                media_kind: parse_media_kind_str(&item.media_kind),
+                llm_title: item.llm_title,
+                llm_episode: item.llm_episode,
+                episode_number: ep_by_path.get(&item.file_path).cloned().unwrap_or(None),
+                bgm,
+                status: item.status,
+            };
+            db.upsert_cached_file_match(&row)?;
+        }
+    } else {
+        let _ = status_tx.send(StatusEvent::LlmParsing { total_files: 0 });
+        let _ = status_tx.send(StatusEvent::Matching {
+            current: 0,
+            total: 0,
+        });
     }
 
-    db.save_report(&root_str, &serde_json::to_string(&report)?)?;
-    for item in report.final_matches.iter() {
-        if item.bgm.id.is_some() {
-            db.upsert_file_match(&root_str, item)?;
-        }
-    }
-
-    let mut matched_files = 0usize;
-    let mut skipped_files = 0usize;
-    let mut unmatched_files = 0usize;
-    for item in &report.items {
-        if item.status == "matched" {
-            matched_files += 1;
-            continue;
-        }
-        if item.status.starts_with("skipped_") {
-            skipped_files += 1;
-        } else {
-            unmatched_files += 1;
-        }
-    }
+    let current_rows = db.list_root_file_matches(&root_str)?;
+    let (matched_files, skipped_files, unmatched_files) =
+        compute_snapshot_counts(&media_files, &current_rows);
 
     let mut grouped: HashMap<i64, Vec<FinalMatch>> = HashMap::new();
-    for matched in report.final_matches.iter().cloned() {
-        if let Some(id) = matched.bgm.id {
-            grouped.entry(id).or_default().push(matched);
-        } else {
-            unmatched_files += 1;
+    for row in &current_rows {
+        if let Some(id) = row.bgm.id
+            && let Some(m) = row.to_final_match()
+        {
+            grouped.entry(id).or_default().push(m);
         }
     }
 
-    let total_series = grouped.len();
+    let total_series = affected_series_ids.len();
     let mut series_done = 0usize;
+    if total_series > 0 {
+        let _ = status_tx.send(StatusEvent::Persisting {
+            current: 0,
+            total: total_series,
+        });
+    }
 
-    for (id, matches) in grouped {
+    for id in affected_series_ids {
         series_done += 1;
         let _ = status_tx.send(StatusEvent::Persisting {
             current: series_done,
             total: total_series,
         });
+
+        let matches = grouped.remove(&id).unwrap_or_default();
+        if matches.is_empty() {
+            if let Some(existing) = db.load_series(id)?
+                && existing.local.root == root_str
+            {
+                db.clear_series(id)?;
+                let _ = data_tx.send(DataEvent::SeriesSaved { id });
+            }
+            continue;
+        }
 
         let record = db.load_series(id)?;
         let now = now_ts();
@@ -305,9 +394,24 @@ async fn run_scrape(
                     || r.air_date.is_none()
             })
             .unwrap_or(true);
+        let needs_cover_meta = record
+            .as_ref()
+            .map(|r| r.cover_url.as_deref().unwrap_or("").trim().is_empty())
+            .unwrap_or(true);
 
-        let details = if needs_rating || needs_episodes || needs_details {
-            Some(fetch_subject_details(&bgm_base, Some(&bgm_token), id).await?)
+        let details = if needs_rating || needs_episodes || needs_details || needs_cover_meta {
+            fetch_subject_details_with_retry(
+                &bgm_base,
+                if bgm_token.is_empty() {
+                    config.bgm.token.as_deref()
+                } else {
+                    Some(bgm_token.as_str())
+                },
+                id,
+                bgm_retries,
+            )
+            .await
+            .ok()
         } else {
             None
         };
@@ -362,15 +466,14 @@ async fn run_scrape(
             let needs_special = matches!(m.media_kind, MediaKind::Audio)
                 || m.file_size < match_opts.min_media_size_bytes;
             if needs_special && !has_special_eps {
-                unmatched_files += 1;
-                if matched_files > 0 {
-                    matched_files -= 1;
-                }
                 series_unmatched.push(m.file_path.clone());
                 continue;
             }
 
-            let episode_num = match m.episode_number {
+            let episode_num = match m
+                .episode_number
+                .or_else(|| fallback_episode_number(&episodes, &m.media_kind))
+            {
                 Some(n) => n,
                 None => {
                     series_unmatched.push(m.file_path.clone());
@@ -434,7 +537,11 @@ async fn run_scrape(
         let existing_cover_updated_at = record.as_ref().map(|r| r.cover_updated_at).unwrap_or(0);
         let cover_missing = existing_cover_local_path
             .as_deref()
-            .map(|v| !Path::new(v).exists())
+            .map(|v| {
+                fs::metadata(v)
+                    .map(|meta| !meta.is_file() || meta.len() == 0)
+                    .unwrap_or(true)
+            })
             .unwrap_or(true);
         let needs_cover = record
             .as_ref()
@@ -444,7 +551,7 @@ async fn run_scrape(
         let mut cover_updated_at = existing_cover_updated_at;
         if let Some(url) = cover_url.as_deref() {
             if needs_cover || cover_missing {
-                if let Ok(path) = cache_cover_image(&cover_cache_dir, id, url).await {
+                if let Ok(path) = cache_cover_image(&cover_cache_dir, id, url, bgm_retries).await {
                     cover_local_path = Some(path.to_string_lossy().to_string());
                     cover_updated_at = now;
                 }
@@ -476,7 +583,7 @@ async fn run_scrape(
     }
 
     let summary = ScrapeSummary {
-        total_files: report.summary.total,
+        total_files: media_files.len(),
         matched_files,
         skipped_files,
         unmatched_files,
@@ -485,6 +592,26 @@ async fn run_scrape(
 
     let _ = status_tx.send(StatusEvent::Finished { summary });
     Ok(())
+}
+
+fn fallback_episode_number(
+    episodes: &[crate::types::EpisodeInfo],
+    media_kind: &MediaKind,
+) -> Option<u32> {
+    let mut mains = BTreeSet::new();
+    for ep in episodes.iter().filter(|e| e.ep_type == 0) {
+        let rounded = ep.sort.round();
+        if rounded >= 1.0 && (ep.sort - rounded).abs() <= 0.01 {
+            mains.insert(rounded as u32);
+        }
+    }
+    if mains.len() == 1 {
+        return mains.first().copied();
+    }
+    if mains.is_empty() && matches!(media_kind, MediaKind::Video) {
+        return Some(1);
+    }
+    None
 }
 
 fn scan_media_files(
@@ -517,11 +644,20 @@ fn scan_dir(
         } else if file_type.is_file() {
             if let Some(kind) = classify_media(&path) {
                 let name = entry.file_name().to_string_lossy().to_string();
-                let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let metadata = entry.metadata().ok();
+                let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                let modified = metadata
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| (d.as_secs(), d.subsec_nanos()))
+                    .unwrap_or((0, 0));
+                let fingerprint = media_fingerprint(&path, size_bytes, modified);
                 out.push(MediaFile {
                     path,
                     name,
                     size_bytes,
+                    fingerprint,
                     kind,
                 });
             }
@@ -563,10 +699,57 @@ fn is_skip_dir(path: &Path) -> bool {
     )
 }
 
+fn media_fingerprint(path: &Path, size_bytes: u64, modified: (u64, u32)) -> String {
+    let mut hasher = DefaultHasher::new();
+    path.to_string_lossy().hash(&mut hasher);
+    size_bytes.hash(&mut hasher);
+    modified.0.hash(&mut hasher);
+    modified.1.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn parse_media_kind_str(v: &str) -> MediaKind {
+    if v.eq_ignore_ascii_case("audio") {
+        MediaKind::Audio
+    } else {
+        MediaKind::Video
+    }
+}
+
+fn compute_snapshot_counts(
+    media_files: &[MediaFile],
+    rows: &[CachedFileMatch],
+) -> (usize, usize, usize) {
+    let mut row_by_path: HashMap<&str, &CachedFileMatch> = HashMap::new();
+    for row in rows {
+        row_by_path.insert(row.file_path.as_str(), row);
+    }
+
+    let mut matched_files = 0usize;
+    let mut skipped_files = 0usize;
+    for file in media_files {
+        let file_path = file.path.to_string_lossy();
+        let Some(row) = row_by_path.get(file_path.as_ref()) else {
+            continue;
+        };
+        if row.status.starts_with("skipped_") {
+            skipped_files += 1;
+        } else if row.bgm.id.is_some() {
+            matched_files += 1;
+        }
+    }
+
+    let unmatched_files = media_files
+        .len()
+        .saturating_sub(matched_files.saturating_add(skipped_files));
+    (matched_files, skipped_files, unmatched_files)
+}
+
 async fn cache_cover_image(
     cache_dir: &Path,
     subject_id: i64,
     source_url: &str,
+    retries: usize,
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let mut url = source_url.trim().to_string();
     if url.starts_with("//") {
@@ -576,25 +759,140 @@ async fn cache_cover_image(
         fs::create_dir_all(cache_dir)?;
     }
 
-    let ext = cover_ext_from_url(&url);
-    let file_path = cache_dir.join(format!("{subject_id}.{ext}"));
-
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
-    let bytes = client
-        .get(&url)
-        .header("User-Agent", "anifrz/0.1")
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    if bytes.is_empty() {
-        return Err("cover image is empty".into());
+    let mut last_error: Option<String> = None;
+    let min_attempts = get_u64_env("COVER_MIN_ATTEMPTS", 6) as usize;
+    let attempts = retries.saturating_add(1).max(min_attempts).max(1);
+    let delay_ms = get_u64_env("COVER_RETRY_DELAY_MS", 420);
+    let url_candidates = cover_url_candidates(&url);
+
+    for attempt in 1..=attempts {
+        for current_url in &url_candidates {
+            let resp = client
+                .get(current_url)
+                .header("User-Agent", "anifrz/0.1")
+                .header("Referer", "https://bgm.tv/")
+                .send()
+                .await;
+            let resp = match resp {
+                Ok(v) => match v.error_for_status() {
+                    Ok(ok) => ok,
+                    Err(err) => {
+                        last_error = Some(format!("{current_url}: {err}"));
+                        continue;
+                    }
+                },
+                Err(err) => {
+                    last_error = Some(format!("{current_url}: {err}"));
+                    continue;
+                }
+            };
+
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.to_ascii_lowercase());
+            let bytes = match resp.bytes().await {
+                Ok(v) => v,
+                Err(err) => {
+                    last_error = Some(format!("{current_url}: {err}"));
+                    continue;
+                }
+            };
+            if bytes.is_empty() {
+                last_error = Some(format!("{current_url}: cover image is empty"));
+                continue;
+            }
+
+            let ext = content_type
+                .as_deref()
+                .and_then(cover_ext_from_content_type)
+                .unwrap_or_else(|| cover_ext_from_url(current_url));
+            let file_path = cache_dir.join(format!("{subject_id}.{ext}"));
+
+            for old_ext in ["jpg", "jpeg", "png", "webp", "gif", "bmp"] {
+                let old_path = cache_dir.join(format!("{subject_id}.{old_ext}"));
+                if old_path != file_path && old_path.exists() {
+                    let _ = fs::remove_file(old_path);
+                }
+            }
+            fs::write(&file_path, &bytes)?;
+            return Ok(file_path);
+        }
+
+        if attempt < attempts && delay_ms > 0 {
+            let backoff = delay_ms.saturating_mul(attempt as u64).min(2200);
+            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+        }
     }
-    fs::write(&file_path, &bytes)?;
-    Ok(file_path)
+
+    Err(last_error
+        .unwrap_or_else(|| "cover download failed".to_string())
+        .into())
+}
+
+async fn fetch_subject_details_with_retry(
+    base_url: &str,
+    token: Option<&str>,
+    id: i64,
+    retries: usize,
+) -> Result<SubjectDetails, Box<dyn std::error::Error + Send + Sync>> {
+    let min_attempts = get_u64_env("BGM_SUBJECT_MIN_ATTEMPTS", 6) as usize;
+    let attempts = retries.saturating_add(1).max(min_attempts).max(1);
+    let delay_ms = get_u64_env("BGM_SUBJECT_RETRY_DELAY_MS", 600);
+    let mut last_error: Option<String> = None;
+
+    for attempt in 1..=attempts {
+        match fetch_subject_details(base_url, token, id).await {
+            Ok(details) => return Ok(details),
+            Err(err) => {
+                last_error = Some(err.to_string());
+                if attempt < attempts && delay_ms > 0 {
+                    let backoff = delay_ms.saturating_mul(attempt as u64).min(2600);
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| "subject details fetch failed".to_string())
+        .into())
+}
+
+fn cover_url_candidates(url: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let push = |list: &mut Vec<String>, value: String| {
+        if !value.trim().is_empty() && !list.iter().any(|v| v == &value) {
+            list.push(value);
+        }
+    };
+
+    push(&mut out, url.to_string());
+    push(&mut out, url.replace("/cover/l/", "/cover/c/"));
+    push(&mut out, url.replace("/cover/l/", "/cover/m/"));
+    push(&mut out, url.replace("/cover/m/", "/cover/c/"));
+    push(&mut out, url.replace("/cover/s/", "/cover/c/"));
+    out
+}
+
+fn cover_ext_from_content_type(content_type: &str) -> Option<String> {
+    let ct = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
+    match ct {
+        "image/jpeg" | "image/jpg" => Some("jpg".to_string()),
+        "image/png" => Some("png".to_string()),
+        "image/webp" => Some("webp".to_string()),
+        "image/gif" => Some("gif".to_string()),
+        "image/bmp" => Some("bmp".to_string()),
+        _ => None,
+    }
 }
 
 fn cover_ext_from_url(url: &str) -> String {

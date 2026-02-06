@@ -1,4 +1,5 @@
 mod backend;
+mod incremental;
 mod matcher;
 mod storage;
 mod types;

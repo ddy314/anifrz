@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main UI capability for local and dev webview.",
+  "windows": [
+    "*"
+  ],
+  "permissions": [
+    "core:default"
+  ],
+  "remote": {
+    "urls": [
+      "http://localhost:1420",
+      "http://127.0.0.1:1420"
+    ]
+  }
+}

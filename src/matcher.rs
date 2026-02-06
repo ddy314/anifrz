@@ -57,7 +57,8 @@ pub async fn bgm_search(
         "filter": { "type": [2] }
     });
     let debug = env_flag("BGM_DEBUG");
-    let attempts = retries.saturating_add(1);
+    let min_attempts = get_u64_env("BGM_MIN_ATTEMPTS", 6) as usize;
+    let attempts = retries.saturating_add(1).max(min_attempts).max(1);
     let delay_ms = get_u64_env("BGM_RETRY_DELAY_MS", 500);
 
     for attempt in 1..=attempts {
@@ -90,7 +91,8 @@ pub async fn bgm_search(
                 }
                 if attempt < attempts {
                     if delay_ms > 0 {
-                        sleep(Duration::from_millis(delay_ms)).await;
+                        let backoff = delay_ms.saturating_mul(attempt as u64).min(2500);
+                        sleep(Duration::from_millis(backoff)).await;
                     }
                     continue;
                 }
@@ -112,7 +114,8 @@ pub async fn bgm_search(
                 }
                 if attempt < attempts {
                     if delay_ms > 0 {
-                        sleep(Duration::from_millis(delay_ms)).await;
+                        let backoff = delay_ms.saturating_mul(attempt as u64).min(2500);
+                        sleep(Duration::from_millis(backoff)).await;
                     }
                     continue;
                 }
@@ -134,7 +137,8 @@ pub async fn bgm_search(
                 }
                 if attempt < attempts {
                     if delay_ms > 0 {
-                        sleep(Duration::from_millis(delay_ms)).await;
+                        let backoff = delay_ms.saturating_mul(attempt as u64).min(2500);
+                        sleep(Duration::from_millis(backoff)).await;
                     }
                     continue;
                 }
@@ -436,14 +440,21 @@ fn parse_episode_list(arr: &[Value]) -> Vec<EpisodeInfo> {
 }
 
 fn parse_cover_url(v: &Value) -> Option<String> {
-    let images = v.get("images")?;
-    let keys = ["large", "common", "medium", "small", "grid"];
-    for key in keys {
-        if let Some(url) = images.get(key).and_then(|x| x.as_str()) {
-            let trimmed = url.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+    if let Some(images) = v.get("images") {
+        let keys = ["large", "common", "medium", "small", "grid"];
+        for key in keys {
+            if let Some(url) = images.get(key).and_then(|x| x.as_str()) {
+                let trimmed = url.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
             }
+        }
+    }
+    if let Some(url) = v.get("image").and_then(|x| x.as_str()) {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
         }
     }
     None
@@ -886,7 +897,9 @@ pub async fn build_report(
         }
     }
 
-    apply_folder_majority(&mut items, &mut final_matches);
+    if !env_flag("ANIFRZ_DISABLE_FOLDER_MAJORITY") {
+        apply_folder_majority(&mut items, &mut final_matches);
+    }
 
     let mut matched = 0usize;
     let mut no_match = 0usize;
@@ -1334,6 +1347,7 @@ async fn process_item(
                     input: input_name.clone(),
                     file_path: file_path.clone(),
                     file_size,
+                    file_fingerprint: item.file.fingerprint.clone(),
                     media_kind: file_kind.clone(),
                     llm_title: title.clone(),
                     llm_episode: episode.clone(),
@@ -1432,6 +1446,7 @@ async fn process_item(
         input: input_name.clone(),
         file_path: file_path.clone(),
         file_size,
+        file_fingerprint: item.file.fingerprint.clone(),
         media_kind: file_kind.clone(),
         llm_title: title.clone(),
         llm_episode: episode.clone(),
@@ -1802,6 +1817,10 @@ async fn build_search_queries(
 }
 
 fn should_expand_queries(title: &str) -> bool {
+    if !env_flag("ANIFRZ_ENABLE_QUERY_EXPAND") {
+        return false;
+    }
+
     let mut ascii = 0usize;
     let mut non_ascii = 0usize;
     for ch in title.chars() {

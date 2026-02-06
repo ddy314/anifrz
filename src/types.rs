@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub bgm: BgmConfig,
@@ -16,7 +16,7 @@ pub struct Config {
     pub media: MediaConfig,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BgmConfig {
     #[serde(default = "default_bgm_base_url")]
     pub base_url: String,
@@ -28,7 +28,7 @@ pub struct BgmConfig {
     pub retries: usize,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LlmConfig {
     #[serde(default = "default_llm_url")]
     pub url: String,
@@ -46,15 +46,21 @@ pub struct LlmConfig {
     pub match_concurrency: usize,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LibraryConfig {
     #[serde(default = "default_library_dir")]
     pub dir: String,
     #[serde(default = "default_refresh_days")]
     pub refresh_days: u64,
+    #[serde(default)]
+    pub media_root: String,
+    #[serde(default = "default_auto_watch")]
+    pub auto_watch: bool,
+    #[serde(default = "default_watch_interval_secs")]
+    pub watch_interval_secs: u64,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MediaConfig {
     #[serde(default = "default_min_media_size_mb")]
     pub min_media_size_mb: u64,
@@ -90,6 +96,9 @@ impl Default for LibraryConfig {
         Self {
             dir: default_library_dir(),
             refresh_days: default_refresh_days(),
+            media_root: String::new(),
+            auto_watch: default_auto_watch(),
+            watch_interval_secs: default_watch_interval_secs(),
         }
     }
 }
@@ -122,7 +131,7 @@ fn default_bgm_limit() -> usize {
 }
 
 fn default_bgm_retries() -> usize {
-    2
+    5
 }
 
 fn default_llm_url() -> String {
@@ -161,18 +170,35 @@ fn default_refresh_days() -> u64 {
     7
 }
 
+fn default_auto_watch() -> bool {
+    false
+}
+
+fn default_watch_interval_secs() -> u64 {
+    5
+}
+
 fn default_min_media_size_mb() -> u64 {
     30
 }
 
 pub fn load_config() -> Config {
-    let config_path = PathBuf::from("config.toml");
-    if let Ok(content) = fs::read_to_string(&config_path) {
+    if let Ok(content) = fs::read_to_string(config_path()) {
         if let Ok(config) = toml::from_str::<Config>(&content) {
             return config;
         }
     }
     Config::default()
+}
+
+pub fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let content = toml::to_string_pretty(config)?;
+    fs::write(config_path(), content)?;
+    Ok(())
+}
+
+fn config_path() -> PathBuf {
+    PathBuf::from("config.toml")
 }
 
 pub fn get_string_config(env_key: &str, config_value: &str, default: &str) -> String {
@@ -272,6 +298,7 @@ pub struct MediaFile {
     pub path: PathBuf,
     pub name: String,
     pub size_bytes: u64,
+    pub fingerprint: String,
     pub kind: MediaKind,
 }
 
@@ -362,7 +389,7 @@ pub struct SeriesRecord {
     pub cover_updated_at: i64,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct BgmMatch {
     pub id: Option<i64>,
     pub name: Option<String>,
@@ -375,11 +402,46 @@ pub struct FinalMatch {
     pub input: String,
     pub file_path: String,
     pub file_size: u64,
+    pub file_fingerprint: String,
     pub media_kind: MediaKind,
     pub llm_title: String,
     pub llm_episode: Option<Value>,
     pub episode_number: Option<u32>,
     pub bgm: BgmMatch,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedFileMatch {
+    pub root_path: String,
+    pub file_path: String,
+    pub input: String,
+    pub file_size: u64,
+    pub file_fingerprint: String,
+    pub media_kind: MediaKind,
+    pub llm_title: String,
+    pub llm_episode: Option<Value>,
+    pub episode_number: Option<u32>,
+    pub bgm: BgmMatch,
+    pub status: String,
+}
+
+impl CachedFileMatch {
+    pub fn to_final_match(&self) -> Option<FinalMatch> {
+        if self.bgm.id.is_none() {
+            return None;
+        }
+        Some(FinalMatch {
+            input: self.input.clone(),
+            file_path: self.file_path.clone(),
+            file_size: self.file_size,
+            file_fingerprint: self.file_fingerprint.clone(),
+            media_kind: self.media_kind.clone(),
+            llm_title: self.llm_title.clone(),
+            llm_episode: self.llm_episode.clone(),
+            episode_number: self.episode_number,
+            bgm: self.bgm.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

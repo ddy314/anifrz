@@ -1,3 +1,4 @@
 /target
 config.toml
 /library
+src/ui/frontend/node_modules

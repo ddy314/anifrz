@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.anifrz.app",
   "build": {
-    "frontendDist": "src/ui/frontend"
+    "beforeBuildCommand": "cd src/ui/frontend && npm run build",
+    "beforeDevCommand": "cd src/ui/frontend && npm run dev",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "src/ui/frontend/dist"
   },
   "app": {
     "withGlobalTauri": true,
