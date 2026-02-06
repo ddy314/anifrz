@@ -24,6 +24,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Some("gui") => {
             ui::run_gui(config)?;
         }
+        Some("ipc") => {
+            ui::run_ipc(config)?;
+        }
         Some("help") | None => print_help(),
         Some(cmd) => {
             println!("unknown command: {cmd}");
@@ -107,4 +110,5 @@ fn print_help() {
     println!("Usage:");
     println!("  anifrz scrape <media_dir>");
     println!("  anifrz gui");
+    println!("  anifrz ipc");
 }

@@ -36,9 +36,18 @@ type MaybeTauri = {
   };
 };
 
+type MaybeElectron = {
+  invoke?: (cmd: string, payload?: Record<string, unknown>) => Promise<unknown>;
+  listen?: (
+    event: string,
+    handler: (payload: { event: string; id: number; payload: unknown }) => void
+  ) => Promise<(() => void) | { (): void }> | (() => void);
+};
+
 declare global {
   interface Window {
     __TAURI__?: MaybeTauri;
+    __ELECTRON__?: MaybeElectron;
   }
 }
 
@@ -51,7 +60,11 @@ export function invokeTauri<T>(cmd: string, payload?: Record<string, unknown>): 
   if (typeof tauriInvoke === "function") {
     return tauriInvoke(cmd, payload) as Promise<T>;
   }
-  return Promise.reject(new Error("Tauri invoke is not available"));
+  const electronInvoke = window.__ELECTRON__?.invoke;
+  if (typeof electronInvoke === "function") {
+    return electronInvoke(cmd, payload) as Promise<T>;
+  }
+  return Promise.reject(new Error("invoke bridge is not available"));
 }
 
 export function toAssetUrl(path: string | null | undefined): string {
@@ -83,11 +96,19 @@ export async function listenTauriEvent<T>(
     return typeof unlisten === "function" ? unlisten : () => {};
   }
 
+  const electronListen = window.__ELECTRON__?.listen;
+  if (typeof electronListen === "function") {
+    const unlisten = await electronListen(event, (ev) => {
+      handler(ev.payload as T);
+    });
+    return typeof unlisten === "function" ? unlisten : () => {};
+  }
+
   try {
     const mod = await import("@tauri-apps/api/event");
     const unlisten = await mod.listen<T>(event, (ev) => handler(ev.payload));
     return unlisten;
   } catch (error) {
-    throw new Error(`listen event failed: ${String(error)}`);
+    return () => {};
   }
 }

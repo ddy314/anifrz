@@ -102,11 +102,15 @@ function ensureRuntimeStatePoller(
 ) {
   if (runtimeStatePoller) return;
   runtimeStatePoller = setInterval(() => {
-    if (!get().isScanning) return;
     api
       .getRuntimeState()
       .then((runtime) => {
-        if (!runtime.scraping && get().isScanning) {
+        const wasScanning = get().isScanning;
+        if (runtime.scraping && !wasScanning) {
+          set({ isScanning: true });
+          return;
+        }
+        if (!runtime.scraping && wasScanning) {
           set({ isScanning: false });
           if (!get().isLoading) {
             void get().fetchLibrary();

@@ -1,3 +1,7 @@
+mod electron_ipc;
+
+pub use electron_ipc::run_ipc;
+
 #[cfg(feature = "tauri-ui")]
 mod tauri_app;
 
@@ -8,5 +12,5 @@ pub use tauri_app::run_gui;
 pub fn run_gui(
     _config: crate::types::Config,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    Err("GUI is disabled. Rebuild with `--features tauri-ui`.".into())
+    Err("GUI is disabled in this build. Use Electron frontend under src/ui/frontend/.".into())
 }

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Play, RefreshCcw, X } from "lucide-react";
 import { useStore } from "../store/useStore";
 import { api } from "../lib/api";
@@ -103,11 +103,15 @@ export const DetailModal = () => {
   const [loading, setLoading] = useState(false);
   const [rematching, setRematching] = useState(false);
   const [visibleEpisodeCount, setVisibleEpisodeCount] = useState(0);
+  const episodesScrollRef = useRef<HTMLElement | null>(null);
+  const episodesLoadSentinelRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreLockRef = useRef(false);
 
   useEffect(() => {
     if (!isDetailOpen || !selectedSeriesId) {
       setDetail(null);
       setVisibleEpisodeCount(0);
+      loadMoreLockRef.current = false;
       return;
     }
     let cancelled = false;
@@ -119,6 +123,7 @@ export const DetailModal = () => {
         setDetail(res);
         const total = res?.episodes.length ?? 0;
         setVisibleEpisodeCount(Math.min(total, INITIAL_EPISODE_BATCH));
+        loadMoreLockRef.current = false;
       })
       .catch(console.error)
       .finally(() => {
@@ -204,18 +209,43 @@ export const DetailModal = () => {
   const loadMoreEpisodes = useCallback(() => {
     const total = detail?.episodes.length ?? 0;
     if (!total) return;
-    setVisibleEpisodeCount((prev) => Math.min(total, prev + EPISODE_BATCH_STEP));
+    setVisibleEpisodeCount((prev) => {
+      if (prev >= total) return prev;
+      return Math.min(total, prev + EPISODE_BATCH_STEP);
+    });
   }, [detail]);
-  const onEpisodesScroll = useCallback(
-    (event: React.UIEvent<HTMLElement>) => {
-      if (!hasMoreEpisodes) return;
-      const target = event.currentTarget;
-      if (target.scrollTop + target.clientHeight >= target.scrollHeight - 360) {
-        loadMoreEpisodes();
+  const requestLoadMoreEpisodes = useCallback(() => {
+    if (!hasMoreEpisodes || loadMoreLockRef.current) return;
+    loadMoreLockRef.current = true;
+    loadMoreEpisodes();
+  }, [hasMoreEpisodes, loadMoreEpisodes]);
+
+  useEffect(() => {
+    loadMoreLockRef.current = false;
+  }, [visibleEpisodeCount]);
+
+  useEffect(() => {
+    if (!isDetailOpen || !hasMoreEpisodes) return;
+    const root = episodesScrollRef.current;
+    const sentinel = episodesLoadSentinelRef.current;
+    if (!root || !sentinel) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          requestLoadMoreEpisodes();
+        }
+      },
+      {
+        root,
+        rootMargin: "0px 0px 360px 0px",
+        threshold: 0.01,
       }
-    },
-    [hasMoreEpisodes, loadMoreEpisodes]
-  );
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMoreEpisodes, isDetailOpen, requestLoadMoreEpisodes, visibleEpisodeCount]);
 
   return (
     <>
@@ -225,7 +255,7 @@ export const DetailModal = () => {
           style={{ animation: "fadeIn 0.2s ease-out forwards" }}
         >
           <div
-            className="absolute inset-0 bg-black/72 backdrop-blur-sm"
+            className="absolute inset-0 bg-black/78"
             onClick={closeDetail}
             style={{ animation: "fadeIn 0.2s ease-out forwards" }}
           />
@@ -322,8 +352,8 @@ export const DetailModal = () => {
                 </aside>
 
                 <section
+                  ref={episodesScrollRef}
                   className="min-h-0 overflow-y-auto p-5 md:p-7 [content-visibility:auto]"
-                  onScroll={onEpisodesScroll}
                 >
                   <div className="mb-4 flex items-end justify-between">
                     <h4 className="text-lg font-semibold text-white">Episodes</h4>
@@ -340,13 +370,14 @@ export const DetailModal = () => {
                   {hasMoreEpisodes ? (
                     <div className="mt-4 flex justify-center">
                       <button
-                        onClick={loadMoreEpisodes}
+                        onClick={requestLoadMoreEpisodes}
                         className="rounded border border-white/20 px-3 py-1.5 text-xs text-zinc-200 transition hover:border-netflix-red hover:text-white"
                       >
                         加载更多（剩余 {detail.episodes.length - visibleEpisodeCount} 集）
                       </button>
                     </div>
                   ) : null}
+                  <div ref={episodesLoadSentinelRef} className="h-1 w-full" aria-hidden="true" />
                 </section>
               </div>
             )}

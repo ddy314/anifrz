@@ -76,7 +76,6 @@ impl LibraryDb {
         Ok(())
     }
 
-    #[cfg(feature = "tauri-ui")]
     pub fn clear_series_match_records(
         &self,
         root: &str,
@@ -321,7 +320,6 @@ impl LibraryDb {
         Ok(row)
     }
 
-    #[cfg(feature = "tauri-ui")]
     pub fn list_series(
         &self,
         limit: usize,

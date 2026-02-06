@@ -126,6 +126,7 @@ const HeroSlide = ({ item, isActive, onAction }: HeroSlideProps) => {
 export const Hero = () => {
   const library = useStore((state) => state.library);
   const openDetail = useStore((state) => state.openDetail);
+  const isDetailOpen = useStore((state) => state.isDetailOpen);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -153,7 +154,7 @@ export const Hero = () => {
   }, [heroItems.length]);
 
   useEffect(() => {
-    if (heroItems.length <= 1 || isPaused) {
+    if (heroItems.length <= 1 || isPaused || isDetailOpen) {
       if (timerRef.current) clearInterval(timerRef.current);
       return;
     }
@@ -161,7 +162,7 @@ export const Hero = () => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [heroItems.length, isPaused, startTimer]);
+  }, [heroItems.length, isPaused, isDetailOpen, startTimer]);
 
   const goTo = useCallback(
     (index: number) => {

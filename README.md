@@ -20,9 +20,19 @@
 # 仅刮削（命令行）
 cargo run -- scrape /path/to/media
 
-# 前端应用（Tauri）
-cargo run --features tauri-ui -- gui
+# 前端应用（Electron）
+cd src/ui/frontend
+npm install
+npm install -D electron
+
+# 终端 1：前端 dev server
+npm run dev
+
+# 终端 2：Electron 壳（自动拉起 Rust IPC 后端）
+npm run electron:dev
 ```
+
+`electron:dev` 会自动执行 Rust 后端（`cargo run -- ipc`），无需再手动启动后端进程。
 
 ## 配置
 
